@@ -1,13 +1,13 @@
 {
-  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "$schema": "../frontend/node_modules/@tauri-apps/cli/schema.json",
   "productName": "Goo",
   "version": "0.1.0",
-  "identifier": "com.goo.app",
+  "identifier": "com.goo.tracker",
   "build": {
-    "beforeBuildCommand": "npm --prefix ./frontend run build",
-    "beforeDevCommand": "npm --prefix ./frontend run dev",
+    "beforeBuildCommand": "npm run build --prefix ../frontend",
+    "beforeDevCommand": "npm run dev --prefix ../frontend",
     "devUrl": "http://localhost:1420",
-    "frontendDist": "./frontend/dist"
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
@@ -24,6 +24,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "icon": [
+      "icons/icon.ico"
+    ]
   }
 }
