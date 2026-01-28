@@ -1,8 +1,7 @@
 -- Goo Logger (Auto): VLC Lua interface that logs played media without manual activation.
 
-local LOG_PATH = "C:\\Users\\cyber\\AppData\\Roaming\\vlc\\.goo_watch_log.txt"
+local LOG_PATH = nil  -- Auto-detected, or set a fixed path here
 local POLL_INTERVAL_US = 1000000 -- 1s
-local running = false
 local last_uri = nil
 
 local function dir_sep()
@@ -44,10 +43,11 @@ local function touch_log()
     local file, err = io.open(LOG_PATH, "a")
     if not file then
         vlc.msg.err("goo_logger_intf: failed to open log file: " .. tostring(err))
-        return
+        return false
     end
     file:close()
     vlc.msg.info("goo_logger_intf: logging to " .. LOG_PATH)
+    return true
 end
 
 local function append_line(line)
@@ -95,34 +95,24 @@ local function log_if_needed()
         last_uri = uri
         local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
         append_line(timestamp .. "|" .. uri)
+        vlc.msg.dbg("goo_logger_intf: logged " .. uri)
     end
 end
 
-function descriptor()
-    return {
-        title = "Goo Logger (Auto)",
-        version = "0.1",
-        author = "goo",
-        shortdesc = "Logs watched media to a file",
-        description = "Background logger for goo that runs on startup.",
-    }
+-- Main execution starts here (interface scripts run top-level code directly)
+vlc.msg.info("goo_logger_intf: starting...")
+
+if not touch_log() then
+    vlc.msg.err("goo_logger_intf: cannot write to log file, exiting")
+    return
 end
 
-function activate()
-    running = true
-    vlc.msg.info("goo_logger_intf: activated")
-    touch_log()
-    while running do
-        log_if_needed()
-        vlc.misc.mwait(vlc.misc.mdate() + POLL_INTERVAL_US)
-    end
-end
+local boot_stamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
+append_line(boot_stamp .. "|__activated__")
+vlc.msg.info("goo_logger_intf: activated and logging to " .. LOG_PATH)
 
-function deactivate()
-    running = false
-    vlc.msg.info("goo_logger_intf: deactivated")
-end
-
-function close()
-    deactivate()
+-- Main polling loop
+while true do
+    log_if_needed()
+    vlc.misc.mwait(vlc.misc.mdate() + POLL_INTERVAL_US)
 end
