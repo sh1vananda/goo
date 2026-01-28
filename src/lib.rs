@@ -65,14 +65,15 @@ pub fn clean_title(raw: &str) -> String {
     let cleaners = cleaners();
     let mut value = raw.trim().to_string();
     
-    // Remove bracketed content
+    // Remove bracketed content first
     value = cleaners.bracketed.replace_all(&value, " ").to_string();
     
-    // Replace separators with spaces
-    value = cleaners.separators.replace_all(&value, " ").to_string();
-    
-    // Remove quality/codec fluff
+    // Remove quality/codec fluff BEFORE replacing separators
+    // This catches patterns like "AAC5.1" before the dot becomes a space
     value = cleaners.fluff.replace_all(&value, " ").to_string();
+    
+    // Now replace separators with spaces
+    value = cleaners.separators.replace_all(&value, " ").to_string();
     
     // Normalize whitespace
     value = cleaners.whitespace.replace_all(&value, " ").to_string();
@@ -83,8 +84,8 @@ pub fn clean_title(raw: &str) -> String {
         .replace_all(&value, "")
         .to_string();
     
-    // Remove trailing single digits or small numbers (often leftover from filenames)
-    value = Regex::new(r"\s+\d{1,2}$")
+    // Remove any remaining single word that's just a number
+    value = Regex::new(r"\b\d+\b")
         .unwrap()
         .replace_all(&value, "")
         .to_string();

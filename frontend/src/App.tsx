@@ -47,16 +47,6 @@ function releaseYear(value?: string | null) {
   return /^\d{4}$/.test(year) ? year : null;
 }
 
-function truncate(text?: string | null, max = 170) {
-  if (!text) {
-    return "No synopsis available.";
-  }
-  if (text.length <= max) {
-    return text;
-  }
-  return `${text.slice(0, max).trim()}...`;
-}
-
 export default function App() {
   const [entries, setEntries] = useState<EnrichedEntry[]>([]);
   const [warning, setWarning] = useState<string | null>(null);
@@ -97,13 +87,23 @@ export default function App() {
     loadHistory();
   }, []);
 
-  const items = useMemo(() => entries.slice().reverse(), [entries]);
+  const items = useMemo(() => {
+    // Deduplicate by cleaned_title, keeping most recent
+    const reversed = entries.slice().reverse();
+    const seen = new Set<string>();
+    return reversed.filter(entry => {
+      const key = entry.cleaned_title.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [entries]);
 
   return (
     <div className="page">
       <header className="header">
         <div className="title-block">
-          <h1>Goo</h1>
+          <h1>GOO</h1>
           <p className="subtitle">Watch history</p>
         </div>
         <div className="header-actions">
@@ -207,7 +207,6 @@ export default function App() {
         {items.map((entry, index) => {
           const title = entry.movie?.title ?? entry.cleaned_title;
           const year = releaseYear(entry.movie?.release_date ?? null);
-          const overview = truncate(entry.movie?.overview ?? null);
           const watched = formatDate(entry.watched_at ?? null);
           const tmdbLink =
             entry.tmdb_url ??
@@ -215,10 +214,9 @@ export default function App() {
               entry.cleaned_title
             )}`;
           const poster = entry.poster_url ?? null;
-          const delay = `${Math.min(index, 20) * 40}ms`;
 
           return (
-            <article className="card" style={{ animationDelay: delay }} key={`${entry.raw_title}-${index}`}>
+            <article className="card" key={`${entry.raw_title}-${index}`}>
               <a className="poster" href={tmdbLink} target="_blank" rel="noreferrer">
                 {poster ? (
                   <img src={poster} alt={`${title} poster`} loading="lazy" />
@@ -234,9 +232,8 @@ export default function App() {
                   <h3>{title}</h3>
                   {year && <span className="badge">{year}</span>}
                 </div>
-                <p className="overview">{overview}</p>
                 <div className="meta">
-                  <span className="meta-item">Watched {watched}</span>
+                  <span className="meta-item">{watched}</span>
                   <a className="tmdb-link" href={tmdbLink} target="_blank" rel="noreferrer">
                     TMDB
                   </a>
