@@ -62,16 +62,26 @@ export default function App() {
   const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"loading" | "idle" | "error">("loading");
-  const [logPath, setLogPath] = useState("");
-  const [cachePath, setCachePath] = useState("");
+  const [logPath, setLogPath] = useState(() => localStorage.getItem("goo_log_path") || "");
+  const [cachePath, setCachePath] = useState(() => localStorage.getItem("goo_cache_path") || "");
+  const [tmdbApiKey, setTmdbApiKey] = useState(() => localStorage.getItem("goo_tmdb_key") || "");
+  const [showSettings, setShowSettings] = useState(false);
+
+  const saveSettings = () => {
+    localStorage.setItem("goo_log_path", logPath);
+    localStorage.setItem("goo_cache_path", cachePath);
+    localStorage.setItem("goo_tmdb_key", tmdbApiKey);
+  };
 
   const loadHistory = async () => {
     setStatus("loading");
     setError(null);
+    saveSettings();
     try {
       const payload = await invoke<HistoryPayload>("load_history", {
         logPath: logPath.trim() ? logPath.trim() : null,
         cachePath: cachePath.trim() ? cachePath.trim() : null,
+        tmdbApiKey: tmdbApiKey.trim() ? tmdbApiKey.trim() : null,
       });
       setEntries(payload.entries ?? []);
       setWarning(payload.cache_warning ?? null);
@@ -99,23 +109,14 @@ export default function App() {
             A lightweight gallery of what VLC has been playing.
           </p>
         </div>
-        <div className="controls">
-          <label className="field">
-            <span>Log path</span>
-            <input
-              value={logPath}
-              onChange={(event) => setLogPath(event.target.value)}
-              placeholder="Auto-detect or set GOO_LOG_PATH"
-            />
-          </label>
-          <label className="field">
-            <span>Cache path</span>
-            <input
-              value={cachePath}
-              onChange={(event) => setCachePath(event.target.value)}
-              placeholder="Optional .goo_cache.json"
-            />
-          </label>
+        <div className="header-actions">
+          <button
+            className="icon-button"
+            onClick={() => setShowSettings(true)}
+            title="Settings"
+          >
+            ⚙️
+          </button>
           <button
             className="primary"
             onClick={loadHistory}
@@ -125,6 +126,60 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {showSettings && (
+        <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Settings</h2>
+              <button className="close-button" onClick={() => setShowSettings(false)}>
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <label className="field">
+                <span>Log path</span>
+                <input
+                  value={logPath}
+                  onChange={(event) => setLogPath(event.target.value)}
+                  placeholder="Auto-detect or set GOO_LOG_PATH"
+                />
+              </label>
+              <label className="field">
+                <span>Cache path</span>
+                <input
+                  value={cachePath}
+                  onChange={(event) => setCachePath(event.target.value)}
+                  placeholder="Optional .goo_cache.json"
+                />
+              </label>
+              <label className="field">
+                <span>TMDB API Key</span>
+                <input
+                  type="password"
+                  value={tmdbApiKey}
+                  onChange={(event) => setTmdbApiKey(event.target.value)}
+                  placeholder="Optional (or set TMDB_API_KEY env)"
+                />
+              </label>
+            </div>
+            <div className="modal-footer">
+              <button className="secondary" onClick={() => setShowSettings(false)}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                onClick={() => {
+                  setShowSettings(false);
+                  loadHistory();
+                }}
+              >
+                Save & Refresh
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {warning && <div className="banner warning">Cache: {warning}</div>}
       {error && (

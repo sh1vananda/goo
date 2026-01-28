@@ -20,11 +20,16 @@ pub struct EnrichedHistory {
 pub fn load_enriched_history(
     log_path: &Path,
     cache_path: Option<&Path>,
+    tmdb_api_key: Option<&str>,
 ) -> Result<EnrichedHistory, AppError> {
     let cache_path = cache_path
         .map(PathBuf::from)
         .unwrap_or_else(|| default_cache_path(log_path));
-    let client = TmdbClient::from_env()?;
+    let client = if let Some(key) = tmdb_api_key {
+        TmdbClient::new(key)
+    } else {
+        TmdbClient::from_env()?
+    };
     let entries = read_watch_log(log_path)?;
 
     let mut cache = MovieCache::load(&cache_path);

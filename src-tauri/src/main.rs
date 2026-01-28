@@ -12,11 +12,13 @@ struct HistoryPayload {
 fn load_history(
     log_path: Option<String>,
     cache_path: Option<String>,
+    tmdb_api_key: Option<String>,
 ) -> Result<HistoryPayload, String> {
     let log_path = resolve_log_path(log_path)?;
     let cache_path = cache_path.as_deref().map(Path::new);
+    let api_key = tmdb_api_key.as_deref();
     let history =
-        goo::app::load_enriched_history(&log_path, cache_path).map_err(|err| err.to_string())?;
+        goo::app::load_enriched_history(&log_path, cache_path, api_key).map_err(|err| err.to_string())?;
 
     Ok(HistoryPayload {
         entries: history.entries,

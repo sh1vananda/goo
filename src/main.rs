@@ -47,7 +47,7 @@ fn run_enrich(mut args: impl Iterator<Item = String>) {
     };
     let cache_path = args.next().map(PathBuf::from);
 
-    let history = match goo::app::load_enriched_history(&log_path, cache_path.as_deref()) {
+    let history = match goo::app::load_enriched_history(&log_path, cache_path.as_deref(), None) {
         Ok(history) => history,
         Err(goo::app::AppError::Tmdb(error)) => {
             eprintln!("TMDB error: {error}. Set TMDB_API_KEY to continue.");
