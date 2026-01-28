@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tauri = { version = "1" }
+tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 goo = { path = ".." }
 
 [build-dependencies]
-tauri-build = { version = "1" }
+tauri-build = { version = "2" }

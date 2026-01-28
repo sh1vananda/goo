@@ -1,6 +1,6 @@
 -- Goo Logger (Auto): VLC Lua interface that logs played media without manual activation.
 
-local LOG_PATH = nil
+local LOG_PATH = "C:\\Users\\cyber\\AppData\\Roaming\\vlc\\.goo_watch_log.txt"
 local POLL_INTERVAL_US = 1000000 -- 1s
 local running = false
 local last_uri = nil
@@ -37,6 +37,17 @@ local function ensure_log_path()
     if not LOG_PATH or LOG_PATH == "" then
         LOG_PATH = default_log_path()
     end
+end
+
+local function touch_log()
+    ensure_log_path()
+    local file, err = io.open(LOG_PATH, "a")
+    if not file then
+        vlc.msg.err("goo_logger_intf: failed to open log file: " .. tostring(err))
+        return
+    end
+    file:close()
+    vlc.msg.info("goo_logger_intf: logging to " .. LOG_PATH)
 end
 
 local function append_line(line)
@@ -77,6 +88,9 @@ local function log_if_needed()
     if not uri then
         return
     end
+    if not vlc.input.is_playing() then
+        return
+    end
     if uri ~= last_uri then
         last_uri = uri
         local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -96,7 +110,8 @@ end
 
 function activate()
     running = true
-    vlc.msg.dbg("goo_logger_intf: activated")
+    vlc.msg.info("goo_logger_intf: activated")
+    touch_log()
     while running do
         log_if_needed()
         vlc.misc.mwait(vlc.misc.mdate() + POLL_INTERVAL_US)
@@ -105,7 +120,7 @@ end
 
 function deactivate()
     running = false
-    vlc.msg.dbg("goo_logger_intf: deactivated")
+    vlc.msg.info("goo_logger_intf: deactivated")
 end
 
 function close()

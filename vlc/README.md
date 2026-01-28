@@ -13,6 +13,11 @@ This runs in the background every time VLC starts with no manual activation.
   - In the `Lua` section below, set `Lua interface` to `goo_logger_intf`.
 - Restart VLC.
 
+## Troubleshooting
+- Remove any old `goo_logger.lua` file from `%APPDATA%\vlc\lua\extensions` to avoid confusion.
+- Verify `Tools -> Messages` is set to verbosity 2. You should see `goo_logger_intf: activated`.
+- If no log file appears, set a fixed path in `vlc/goo_logger_intf.lua` and restart VLC.
+
 
 ## Log format
 Each line is:
