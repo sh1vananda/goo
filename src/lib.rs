@@ -25,7 +25,7 @@ fn cleaners() -> &'static Cleaners {
     CLEANERS.get_or_init(|| Cleaners {
         bracketed: Regex::new(r"(?i)[\[\(\{].*?[\]\)\}]").expect("valid bracket regex"),
         fluff: Regex::new(
-            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|x264|x265|h264|h265|hevc|aac|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|dvdrip|remux|proper|repack|extended|uncut|10bit|8bit|yify|rarbg)\b",
+            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|x264|x265|h264|h265|hevc|aac\d*\.?\d*|ac3|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|hdr10\+|dvdrip|remux|proper|repack|extended|uncut|10bit|8bit|yify|rarbg|yts|mx|etrg|pahe|tigole|qxr|joy|sparks)\b",
         )
         .expect("valid fluff regex"),
         separators: Regex::new(r"[._-]+").expect("valid separator regex"),
@@ -64,10 +64,34 @@ pub fn parse_log_line(line: &str) -> Option<WatchEntry> {
 pub fn clean_title(raw: &str) -> String {
     let cleaners = cleaners();
     let mut value = raw.trim().to_string();
+    
+    // Remove bracketed content
     value = cleaners.bracketed.replace_all(&value, " ").to_string();
+    
+    // Replace separators with spaces
     value = cleaners.separators.replace_all(&value, " ").to_string();
+    
+    // Remove quality/codec fluff
     value = cleaners.fluff.replace_all(&value, " ").to_string();
+    
+    // Normalize whitespace
     value = cleaners.whitespace.replace_all(&value, " ").to_string();
+    
+    // Remove 4-digit years (1900-2099)
+    value = Regex::new(r"\b(19|20)\d{2}\b")
+        .unwrap()
+        .replace_all(&value, "")
+        .to_string();
+    
+    // Remove trailing single digits or small numbers (often leftover from filenames)
+    value = Regex::new(r"\s+\d{1,2}$")
+        .unwrap()
+        .replace_all(&value, "")
+        .to_string();
+    
+    // Final whitespace cleanup
+    value = cleaners.whitespace.replace_all(&value, " ").to_string();
+    
     value.trim().to_string()
 }
 
@@ -100,13 +124,19 @@ mod tests {
     #[test]
     fn cleans_common_fluff() {
         let cleaned = clean_title("Dune.2021.1080p.BluRay.x264.DTS.mkv");
-        assert_eq!(cleaned, "Dune 2021");
+        assert_eq!(cleaned, "Dune");
     }
 
     #[test]
     fn removes_bracketed_segments() {
         let cleaned = clean_title("The.Matrix.(1999).2160p.HDR.Remux.mkv");
         assert_eq!(cleaned, "The Matrix");
+    }
+
+    #[test]
+    fn cleans_amores_perros() {
+        let cleaned = clean_title("Amores.Perros.2000.1080p.BluRay.x264.AAC5.1");
+        assert_eq!(cleaned, "Amores Perros");
     }
 
     #[test]
