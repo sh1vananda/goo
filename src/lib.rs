@@ -2,6 +2,8 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub mod tmdb;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchEntry {
     pub watched_at: Option<String>,
