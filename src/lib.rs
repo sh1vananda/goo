@@ -65,34 +65,25 @@ pub fn clean_title(raw: &str) -> String {
     let cleaners = cleaners();
     let mut value = raw.trim().to_string();
     
-    // Remove bracketed content first
     value = cleaners.bracketed.replace_all(&value, " ").to_string();
     
-    // Remove quality/codec fluff BEFORE replacing separators
-    // This catches patterns like "AAC5.1" before the dot becomes a space
+    // Process fluff BEFORE separators
     value = cleaners.fluff.replace_all(&value, " ").to_string();
-    
-    // Now replace separators with spaces
     value = cleaners.separators.replace_all(&value, " ").to_string();
-    
-    // Normalize whitespace
     value = cleaners.whitespace.replace_all(&value, " ").to_string();
     
-    // Remove 4-digit years (1900-2099)
+    // Remove years and standalone numbers
     value = Regex::new(r"\b(19|20)\d{2}\b")
         .unwrap()
         .replace_all(&value, "")
         .to_string();
     
-    // Remove any remaining single word that's just a number
     value = Regex::new(r"\b\d+\b")
         .unwrap()
         .replace_all(&value, "")
         .to_string();
     
-    // Final whitespace cleanup
     value = cleaners.whitespace.replace_all(&value, " ").to_string();
-    
     value.trim().to_string()
 }
 
