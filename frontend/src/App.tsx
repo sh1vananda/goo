@@ -229,7 +229,7 @@ export default function App() {
               </a>
               <div className="card-body">
                 <div className="title-row">
-                  <h3>{title}</h3>
+                  <h3 title={title}>{title}</h3>
                   {year && <span className="badge">{year}</span>}
                 </div>
                 <div className="meta">
