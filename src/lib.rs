@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub mod tmdb;
+pub mod enrich;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchEntry {

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const TMDB_SEARCH_URL: &str = "https://api.themoviedb.org/3/search/movie";
 const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p/";
@@ -11,7 +11,7 @@ pub struct TmdbClient {
     api_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TmdbMovie {
     pub id: u32,
     pub title: String,
