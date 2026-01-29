@@ -1,11 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct HistoryPayload {
     entries: Vec<goo::enrich::EnrichedEntry>,
     cache_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AppSettings {
+    log_path: Option<String>,
+    cache_path: Option<String>,
+    tmdb_api_key: Option<String>,
 }
 
 #[tauri::command]
@@ -14,9 +23,13 @@ fn load_history(
     cache_path: Option<String>,
     tmdb_api_key: Option<String>,
 ) -> Result<HistoryPayload, String> {
-    let log_path = resolve_log_path(log_path)?;
+    let settings = read_settings();
+    let log_path = resolve_log_path(log_path.or(settings.log_path))?;
+    let cache_path = cache_path.or(settings.cache_path);
+    let api_key = tmdb_api_key.or(settings.tmdb_api_key);
+
     let cache_path = cache_path.as_deref().map(Path::new);
-    let api_key = tmdb_api_key.as_deref();
+    let api_key = api_key.as_deref();
     let history =
         goo::app::load_enriched_history(&log_path, cache_path, api_key).map_err(|err| err.to_string())?;
 
@@ -24,6 +37,16 @@ fn load_history(
         entries: history.entries,
         cache_warning: history.cache_warning,
     })
+}
+
+#[tauri::command]
+fn load_settings() -> Result<AppSettings, String> {
+    Ok(read_settings())
+}
+
+#[tauri::command]
+fn save_settings(settings: AppSettings) -> Result<(), String> {
+    write_settings(&settings)
 }
 
 fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
@@ -36,9 +59,177 @@ fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
     })
 }
 
+fn read_settings() -> AppSettings {
+    let Some(path) = settings_path() else {
+        return AppSettings::default();
+    };
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn write_settings(settings: &AppSettings) -> Result<(), String> {
+    let Some(path) = settings_path() else {
+        return Err("Settings path not available".to_string());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let payload = serde_json::to_string_pretty(settings).map_err(|err| err.to_string())?;
+    fs::write(path, payload).map_err(|err| err.to_string())
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let base = config_base_dir()?;
+    Some(base.join("settings.json"))
+}
+
+fn config_base_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("goo"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(|base| PathBuf::from(base).join("Library").join("Application Support").join("goo"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
+            return Some(PathBuf::from(base).join("goo"));
+        }
+        std::env::var_os("HOME").map(|base| PathBuf::from(base).join(".config").join("goo"))
+    }
+}
+
+fn install_vlc_logger() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let Some(appdata) = std::env::var_os("APPDATA") else {
+            return Ok(());
+        };
+        let vlc_dir = PathBuf::from(appdata).join("vlc");
+        let intf_dir = vlc_dir.join("lua").join("intf");
+        fs::create_dir_all(&intf_dir).map_err(|err| err.to_string())?;
+
+        let target = intf_dir.join("goo_logger_intf.lua");
+        let payload = include_bytes!("../../vlc/goo_logger_intf.lua");
+        if fs::read(&target).map(|existing| existing == payload).unwrap_or(false) {
+            ensure_vlcrc(&vlc_dir)?;
+            return Ok(());
+        }
+
+        fs::write(&target, payload).map_err(|err| err.to_string())?;
+        ensure_vlcrc(&vlc_dir)?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Non-Windows installs are currently manual.
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_vlcrc(vlc_dir: &Path) -> Result<(), String> {
+    let vlcrc_path = vlc_dir.join("vlcrc");
+    let content = fs::read_to_string(&vlcrc_path).unwrap_or_default();
+    let content = upsert_setting(&content, "lua-intf", "goo_logger_intf");
+    let content = upsert_extraintf(&content, "luaintf");
+    fs::write(&vlcrc_path, content).map_err(|err| err.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn upsert_setting(content: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if is_setting_line(line, key) {
+            lines.push(format!("{key}={value}"));
+            found = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !found {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("{key}={value}"));
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(target_os = "windows")]
+fn upsert_extraintf(content: &str, value: &str) -> String {
+    let key = "extraintf";
+    let mut found = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if is_setting_line(line, key) {
+            found = true;
+            lines.push(format!("{key}={}", merge_extraintf_value(line, value)));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !found {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.push(format!("{key}={value}"));
+    }
+
+    lines.join("\n")
+}
+
+#[cfg(target_os = "windows")]
+fn merge_extraintf_value(line: &str, value: &str) -> String {
+    let Some((_, raw)) = line.split_once('=') else {
+        return value.to_string();
+    };
+    let mut items: Vec<String> = raw
+        .split(|ch| ch == ':' || ch == ',')
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+        .collect();
+
+    if !items.iter().any(|item| item.eq_ignore_ascii_case(value)) {
+        items.push(value.to_string());
+    }
+
+    items.join(":")
+}
+
+#[cfg(target_os = "windows")]
+fn is_setting_line(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    let trimmed = trimmed.strip_prefix('#').unwrap_or(trimmed).trim_start();
+    trimmed.starts_with(&format!("{key}="))
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_history])
+        .setup(|_| {
+            if let Err(err) = install_vlc_logger() {
+                eprintln!("Failed to install VLC logger: {err}");
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            load_history,
+            load_settings,
+            save_settings
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -14,14 +14,26 @@ type EnrichedEntry = {
   watched_at?: string | null;
   raw_title: string;
   cleaned_title: string;
+  release_year?: number | null;
   movie?: Movie | null;
   tmdb_url?: string | null;
   poster_url?: string | null;
 };
 
+type AppSettings = {
+  log_path?: string | null;
+  cache_path?: string | null;
+  tmdb_api_key?: string | null;
+};
+
 type HistoryPayload = {
   entries: EnrichedEntry[];
   cache_warning?: string | null;
+};
+
+type GroupedEntry = {
+  entry: EnrichedEntry;
+  watch_dates: string[];
 };
 
 function formatDate(value?: string | null) {
@@ -47,31 +59,81 @@ function releaseYear(value?: string | null) {
   return /^\d{4}$/.test(year) ? year : null;
 }
 
+function normalizeSetting(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function resolveSetting(
+  override: Partial<AppSettings> | undefined,
+  key: keyof AppSettings,
+  fallback: string
+) {
+  if (override && key in override) {
+    const value = override[key];
+    return typeof value === "string" ? value : "";
+  }
+  return fallback;
+}
+
+function formatWatchDates(values: string[]) {
+  if (values.length === 0) {
+    return { text: "Date unknown", full: "" };
+  }
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  values.forEach(value => {
+    if (!seen.has(value)) {
+      seen.add(value);
+      unique.push(value);
+    }
+  });
+  const formatted = unique.map(formatDate);
+  if (formatted.length <= 2) {
+    const text = formatted.join(" · ");
+    return { text, full: text };
+  }
+  const visible = formatted.slice(0, 2);
+  const remaining = formatted.length - 2;
+  return {
+    text: `${visible.join(" · ")} · +${remaining} more`,
+    full: formatted.join(" · "),
+  };
+}
+
 export default function App() {
   const [entries, setEntries] = useState<EnrichedEntry[]>([]);
   const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<"loading" | "idle" | "error">("loading");
-  const [logPath, setLogPath] = useState(() => localStorage.getItem("goo_log_path") || "");
-  const [cachePath, setCachePath] = useState(() => localStorage.getItem("goo_cache_path") || "");
-  const [tmdbApiKey, setTmdbApiKey] = useState(() => localStorage.getItem("goo_tmdb_key") || "");
+  const [logPath, setLogPath] = useState("");
+  const [cachePath, setCachePath] = useState("");
+  const [tmdbApiKey, setTmdbApiKey] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
-  const saveSettings = () => {
-    localStorage.setItem("goo_log_path", logPath);
-    localStorage.setItem("goo_cache_path", cachePath);
-    localStorage.setItem("goo_tmdb_key", tmdbApiKey);
+  const buildSettingsPayload = (overrides?: Partial<AppSettings>) => ({
+    log_path: normalizeSetting(resolveSetting(overrides, "log_path", logPath)),
+    cache_path: normalizeSetting(resolveSetting(overrides, "cache_path", cachePath)),
+    tmdb_api_key: normalizeSetting(resolveSetting(overrides, "tmdb_api_key", tmdbApiKey)),
+  });
+
+  const saveSettings = async () => {
+    const payload = buildSettingsPayload();
+    await invoke("save_settings", { settings: payload });
   };
 
-  const loadHistory = async () => {
+  const loadHistory = async (overrides?: Partial<AppSettings>) => {
     setStatus("loading");
     setError(null);
-    saveSettings();
+    const settingsPayload = buildSettingsPayload(overrides);
     try {
       const payload = await invoke<HistoryPayload>("load_history", {
-        logPath: logPath.trim() ? logPath.trim() : null,
-        cachePath: cachePath.trim() ? cachePath.trim() : null,
-        tmdbApiKey: tmdbApiKey.trim() ? tmdbApiKey.trim() : null,
+        logPath: settingsPayload.log_path,
+        cachePath: settingsPayload.cache_path,
+        tmdbApiKey: settingsPayload.tmdb_api_key,
       });
       setEntries(payload.entries ?? []);
       setWarning(payload.cache_warning ?? null);
@@ -84,19 +146,43 @@ export default function App() {
   };
 
   useEffect(() => {
-    loadHistory();
+    const init = async () => {
+      try {
+        const settings = await invoke<AppSettings>("load_settings");
+        setLogPath(settings.log_path ?? "");
+        setCachePath(settings.cache_path ?? "");
+        setTmdbApiKey(settings.tmdb_api_key ?? "");
+        await loadHistory(settings);
+      } catch {
+        await loadHistory();
+      }
+    };
+    void init();
   }, []);
 
   const items = useMemo(() => {
-    // Deduplicate by cleaned_title, keeping most recent
+    const byKey = new Map<string, GroupedEntry>();
+    const order: string[] = [];
     const reversed = entries.slice().reverse();
-    const seen = new Set<string>();
-    return reversed.filter(entry => {
-      const key = entry.cleaned_title.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+    reversed.forEach(entry => {
+      const year = entry.release_year ?? releaseYear(entry.movie?.release_date ?? null);
+      const key = `${entry.cleaned_title.toLowerCase()}${year ? `|${year}` : ""}`;
+      const existing = byKey.get(key);
+      if (existing) {
+        const watched = entry.watched_at;
+        if (watched && !existing.watch_dates.includes(watched)) {
+          existing.watch_dates.push(watched);
+        }
+        return;
+      }
+      const watched = entry.watched_at;
+      byKey.set(key, {
+        entry,
+        watch_dates: watched ? [watched] : [],
+      });
+      order.push(key);
     });
+    return order.map(key => byKey.get(key)).filter(Boolean) as GroupedEntry[];
   }, [entries]);
 
   return (
@@ -175,7 +261,13 @@ export default function App() {
                 className="primary"
                 onClick={() => {
                   setShowSettings(false);
-                  loadHistory();
+                  saveSettings()
+                    .then(() => loadHistory())
+                    .catch(err => {
+                      const message = err instanceof Error ? err.message : String(err);
+                      setError(message);
+                      setStatus("error");
+                    });
                 }}
               >
                 Save & Refresh
@@ -204,10 +296,12 @@ export default function App() {
       )}
 
       <section className="grid">
-        {items.map((entry, index) => {
+        {items.map((item, index) => {
+          const entry = item.entry;
           const title = entry.movie?.title ?? entry.cleaned_title;
-          const year = releaseYear(entry.movie?.release_date ?? null);
-          const watched = formatDate(entry.watched_at ?? null);
+          const year = entry.release_year ?? releaseYear(entry.movie?.release_date ?? null);
+          const dateInfo = formatWatchDates(item.watch_dates);
+          const dateTitle = dateInfo.full !== dateInfo.text ? dateInfo.full : undefined;
           const tmdbLink =
             entry.tmdb_url ??
             `https://www.themoviedb.org/search?query=${encodeURIComponent(
@@ -233,7 +327,9 @@ export default function App() {
                   {year && <span className="badge">{year}</span>}
                 </div>
                 <div className="meta">
-                  <span className="meta-item">{watched}</span>
+                  <span className="meta-item" title={dateTitle}>
+                    {dateInfo.text}
+                  </span>
                   <a className="tmdb-link" href={tmdbLink} target="_blank" rel="noreferrer">
                     TMDB
                   </a>
