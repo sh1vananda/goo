@@ -23,6 +23,12 @@ type EnrichedEntry = {
 type AppSettings = {
   log_path?: string | null;
   cache_path?: string | null;
+  tmdb_key_present?: boolean | null;
+};
+
+type SettingsInput = {
+  log_path?: string | null;
+  cache_path?: string | null;
   tmdb_api_key?: string | null;
 };
 
@@ -112,12 +118,13 @@ export default function App() {
   const [logPath, setLogPath] = useState("");
   const [cachePath, setCachePath] = useState("");
   const [tmdbApiKey, setTmdbApiKey] = useState("");
+  const [tmdbKeyPresent, setTmdbKeyPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  const buildSettingsPayload = (overrides?: Partial<AppSettings>) => ({
+  const buildSettingsPayload = (overrides?: Partial<AppSettings>): SettingsInput => ({
     log_path: normalizeSetting(resolveSetting(overrides, "log_path", logPath)),
     cache_path: normalizeSetting(resolveSetting(overrides, "cache_path", cachePath)),
-    tmdb_api_key: normalizeSetting(resolveSetting(overrides, "tmdb_api_key", tmdbApiKey)),
+    tmdb_api_key: normalizeSetting(tmdbApiKey),
   });
 
   const saveSettings = async () => {
@@ -151,7 +158,8 @@ export default function App() {
         const settings = await invoke<AppSettings>("load_settings");
         setLogPath(settings.log_path ?? "");
         setCachePath(settings.cache_path ?? "");
-        setTmdbApiKey(settings.tmdb_api_key ?? "");
+        setTmdbKeyPresent(Boolean(settings.tmdb_key_present));
+        setTmdbApiKey("");
         await loadHistory(settings);
       } catch {
         await loadHistory();
@@ -249,11 +257,30 @@ export default function App() {
                   type="password"
                   value={tmdbApiKey}
                   onChange={(event) => setTmdbApiKey(event.target.value)}
-                  placeholder="Optional (or set TMDB_API_KEY env)"
+                  placeholder={tmdbKeyPresent ? "Saved in Windows Credential Manager" : "Optional (or set TMDB_API_KEY env)"}
                 />
               </label>
             </div>
             <div className="modal-footer">
+              {tmdbKeyPresent && (
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    invoke("clear_tmdb_key")
+                      .then(() => {
+                        setTmdbKeyPresent(false);
+                        setTmdbApiKey("");
+                      })
+                      .catch(err => {
+                        const message = err instanceof Error ? err.message : String(err);
+                        setError(message);
+                        setStatus("error");
+                      });
+                  }}
+                >
+                  Clear Key
+                </button>
+              )}
               <button className="secondary" onClick={() => setShowSettings(false)}>
                 Cancel
               </button>
@@ -262,7 +289,13 @@ export default function App() {
                 onClick={() => {
                   setShowSettings(false);
                   saveSettings()
-                    .then(() => loadHistory())
+                    .then(() => {
+                      if (tmdbApiKey.trim()) {
+                        setTmdbKeyPresent(true);
+                        setTmdbApiKey("");
+                      }
+                      return loadHistory();
+                    })
                     .catch(err => {
                       const message = err instanceof Error ? err.message : String(err);
                       setError(message);
@@ -282,7 +315,7 @@ export default function App() {
         <div className="banner error">
           {error}
           <span className="hint">
-            If this mentions TMDB, set TMDB_API_KEY for the backend.
+            If this mentions TMDB, set a key in Settings or via TMDB_API_KEY.
           </span>
         </div>
       )}

@@ -40,7 +40,11 @@ fn cleaners() -> &'static Cleaners {
 }
 
 pub fn read_watch_log(path: &Path) -> std::io::Result<Vec<WatchEntry>> {
-    let content = std::fs::read_to_string(path)?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
     let mut entries = Vec::new();
     for line in content.lines() {
         if let Some(entry) = parse_log_line(line) {

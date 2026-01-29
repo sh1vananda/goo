@@ -11,3 +11,6 @@ goo = { path = ".." }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = "2"

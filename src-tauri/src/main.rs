@@ -11,7 +11,20 @@ struct HistoryPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AppSettings {
+struct StoredSettings {
+    log_path: Option<String>,
+    cache_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct SettingsPayload {
+    log_path: Option<String>,
+    cache_path: Option<String>,
+    tmdb_key_present: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct SettingsInput {
     log_path: Option<String>,
     cache_path: Option<String>,
     tmdb_api_key: Option<String>,
@@ -26,7 +39,9 @@ fn load_history(
     let settings = read_settings();
     let log_path = resolve_log_path(log_path.or(settings.log_path))?;
     let cache_path = cache_path.or(settings.cache_path);
-    let api_key = tmdb_api_key.or(settings.tmdb_api_key);
+    let api_key = tmdb_api_key
+        .and_then(normalize_key)
+        .or_else(read_tmdb_key);
 
     let cache_path = cache_path.as_deref().map(Path::new);
     let api_key = api_key.as_deref();
@@ -40,13 +55,32 @@ fn load_history(
 }
 
 #[tauri::command]
-fn load_settings() -> Result<AppSettings, String> {
-    Ok(read_settings())
+fn load_settings() -> Result<SettingsPayload, String> {
+    let settings = read_settings();
+    let tmdb_key_present = read_tmdb_key().is_some();
+    Ok(SettingsPayload {
+        log_path: settings.log_path,
+        cache_path: settings.cache_path,
+        tmdb_key_present,
+    })
 }
 
 #[tauri::command]
-fn save_settings(settings: AppSettings) -> Result<(), String> {
-    write_settings(&settings)
+fn save_settings(settings: SettingsInput) -> Result<(), String> {
+    let stored = StoredSettings {
+        log_path: settings.log_path,
+        cache_path: settings.cache_path,
+    };
+    write_settings(&stored)?;
+    if let Some(key) = settings.tmdb_api_key.and_then(normalize_key) {
+        store_tmdb_key(&key)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_tmdb_key() -> Result<(), String> {
+    delete_tmdb_key()
 }
 
 fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
@@ -59,19 +93,19 @@ fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
     })
 }
 
-fn read_settings() -> AppSettings {
+fn read_settings() -> StoredSettings {
     let Some(path) = settings_path() else {
-        return AppSettings::default();
+        return StoredSettings::default();
     };
 
     let Ok(content) = fs::read_to_string(path) else {
-        return AppSettings::default();
+        return StoredSettings::default();
     };
 
     serde_json::from_str(&content).unwrap_or_default()
 }
 
-fn write_settings(settings: &AppSettings) -> Result<(), String> {
+fn write_settings(settings: &StoredSettings) -> Result<(), String> {
     let Some(path) = settings_path() else {
         return Err("Settings path not available".to_string());
     };
@@ -104,6 +138,51 @@ fn config_base_dir() -> Option<PathBuf> {
         }
         std::env::var_os("HOME").map(|base| PathBuf::from(base).join(".config").join("goo"))
     }
+}
+
+fn normalize_key(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_tmdb_key() -> Option<String> {
+    let entry = keyring::Entry::new("goo", "tmdb_api_key").ok()?;
+    match entry.get_password() {
+        Ok(value) => normalize_key(value),
+        Err(_) => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_tmdb_key() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn store_tmdb_key(value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "tmdb_api_key").map_err(|err| err.to_string())?;
+    entry.set_password(value).map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn store_tmdb_key(_value: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_tmdb_key() -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "tmdb_api_key").map_err(|err| err.to_string())?;
+    entry.delete_password().map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn delete_tmdb_key() -> Result<(), String> {
+    Ok(())
 }
 
 fn install_vlc_logger() -> Result<(), String> {
@@ -228,7 +307,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_history,
             load_settings,
-            save_settings
+            save_settings,
+            clear_tmdb_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
