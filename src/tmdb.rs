@@ -50,18 +50,23 @@ impl TmdbClient {
         Ok(Self::new(key))
     }
 
-    pub fn search_movie(&self, title: &str) -> Result<Vec<TmdbMovie>, TmdbError> {
+    pub fn search_movie(&self, title: &str, year: Option<i32>) -> Result<Vec<TmdbMovie>, TmdbError> {
         let trimmed = title.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
 
-        let response = ureq::get(TMDB_SEARCH_URL)
+        let mut request = ureq::get(TMDB_SEARCH_URL)
             .set("Accept", "application/json")
             .query("api_key", &self.api_key)
             .query("query", trimmed)
-            .query("include_adult", "false")
-            .call();
+            .query("include_adult", "false");
+
+        if let Some(year) = year {
+            request = request.query("year", &year.to_string());
+        }
+
+        let response = request.call();
 
         let response = match response {
             Ok(value) => value,
@@ -77,8 +82,8 @@ impl TmdbClient {
         Ok(parsed.results)
     }
 
-    pub fn best_match(&self, title: &str) -> Result<Option<TmdbMovie>, TmdbError> {
-        Ok(self.search_movie(title)?.into_iter().next())
+    pub fn best_match(&self, title: &str, year: Option<i32>) -> Result<Option<TmdbMovie>, TmdbError> {
+        Ok(self.search_movie(title, year)?.into_iter().next())
     }
 }
 

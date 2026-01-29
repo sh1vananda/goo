@@ -41,13 +41,13 @@ pub fn enrich_entries(
 ) -> Result<Vec<EnrichedEntry>, TmdbError> {
     let mut enriched = Vec::with_capacity(entries.len());
     for entry in entries {
-        let key = cache_key(&entry.cleaned_title);
+        let key = cache_key(&entry.cleaned_title, entry.release_year);
         let movie = if key.is_empty() {
             None
         } else if let Some(cached) = cache.entries.get(&key) {
             cached.clone()
         } else {
-            let fetched = client.best_match(&entry.cleaned_title)?;
+            let fetched = client.best_match(&entry.cleaned_title, entry.release_year)?;
             cache.entries.insert(key, fetched.clone());
             fetched
         };
@@ -57,8 +57,13 @@ pub fn enrich_entries(
     Ok(enriched)
 }
 
-fn cache_key(title: &str) -> String {
-    title.trim().to_lowercase()
+fn cache_key(title: &str, year: Option<i32>) -> String {
+    let mut key = title.trim().to_lowercase();
+    if let Some(year) = year {
+        key.push('|');
+        key.push_str(&year.to_string());
+    }
+    key
 }
 
 impl EnrichedEntry {
