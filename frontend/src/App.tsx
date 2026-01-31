@@ -120,6 +120,7 @@ export default function App() {
   const [tmdbApiKey, setTmdbApiKey] = useState("");
   const [tmdbKeyPresent, setTmdbKeyPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [busyAction, setBusyAction] = useState<"delete-log" | "delete-entry" | null>(null);
 
   const buildSettingsPayload = (overrides?: Partial<AppSettings>): SettingsInput => ({
     log_path: normalizeSetting(resolveSetting(overrides, "log_path", logPath)),
@@ -281,6 +282,31 @@ export default function App() {
                   Clear Key
                 </button>
               )}
+              <button
+                className="secondary"
+                onClick={async () => {
+                  const ok = window.confirm(
+                    "Clear the entire watch log? VLC will recreate it on next play."
+                  );
+                  if (!ok) return;
+                  setBusyAction("delete-log");
+                  try {
+                    await invoke("delete_log", {
+                      logPath: logPath.trim() ? logPath.trim() : null,
+                    });
+                    await loadHistory();
+                  } catch (err) {
+                    const message = err instanceof Error ? err.message : String(err);
+                    setError(message);
+                    setStatus("error");
+                  } finally {
+                    setBusyAction(null);
+                  }
+                }}
+                disabled={busyAction !== null}
+              >
+                Clear Log
+              </button>
               <button className="secondary" onClick={() => setShowSettings(false)}>
                 Cancel
               </button>
@@ -363,9 +389,43 @@ export default function App() {
                   <span className="meta-item" title={dateTitle}>
                     {dateInfo.text}
                   </span>
-                  <a className="tmdb-link" href={tmdbLink} target="_blank" rel="noreferrer">
-                    TMDB
-                  </a>
+                  <div className="meta-actions">
+                    <a className="tmdb-link" href={tmdbLink} target="_blank" rel="noreferrer">
+                      TMDB
+                    </a>
+                    <button
+                      className="meta-button"
+                      onClick={async () => {
+                        const ok = window.confirm(
+                          "Remove this title (all watch dates) from your history?"
+                        );
+                        if (!ok) return;
+                        setBusyAction("delete-entry");
+                        try {
+                          await invoke("delete_entry", {
+                            logPath: logPath.trim() ? logPath.trim() : null,
+                            cleanedTitle: entry.cleaned_title,
+                            releaseYear: entry.release_year ?? null,
+                          });
+                          await loadHistory();
+                        } catch (err) {
+                          const message = err instanceof Error ? err.message : String(err);
+                          setError(message);
+                          setStatus("error");
+                        } finally {
+                          setBusyAction(null);
+                        }
+                      }}
+                      disabled={busyAction !== null}
+                      title="Remove from history"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M6 6l1 14h10l1-14" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
             </article>

@@ -83,6 +83,24 @@ fn clear_tmdb_key() -> Result<(), String> {
     delete_tmdb_key()
 }
 
+#[tauri::command]
+fn delete_log(log_path: Option<String>) -> Result<(), String> {
+    let settings = read_settings();
+    let log_path = resolve_log_path(log_path.or(settings.log_path))?;
+    delete_log_file(&log_path)
+}
+
+#[tauri::command]
+fn delete_entry(
+    log_path: Option<String>,
+    cleaned_title: String,
+    release_year: Option<i32>,
+) -> Result<(), String> {
+    let settings = read_settings();
+    let log_path = resolve_log_path(log_path.or(settings.log_path))?;
+    delete_log_entries(&log_path, &cleaned_title, release_year)
+}
+
 fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
     if let Some(value) = arg {
         return Ok(PathBuf::from(value));
@@ -308,8 +326,65 @@ fn main() {
             load_history,
             load_settings,
             save_settings,
-            clear_tmdb_key
+            clear_tmdb_key,
+            delete_log,
+            delete_entry
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn delete_log_file(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn delete_log_entries(
+    path: &Path,
+    cleaned_title: &str,
+    release_year: Option<i32>,
+) -> Result<(), String> {
+    let target = cleaned_title.trim();
+    if target.is_empty() {
+        return Ok(());
+    }
+
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+
+    let target_normalized = target.to_lowercase();
+    let mut kept = Vec::new();
+    let mut removed_any = false;
+
+    for line in content.lines() {
+        let should_remove = goo::parse_log_line(line)
+            .map(|entry| {
+                entry.cleaned_title.trim().to_lowercase() == target_normalized
+                    && entry.release_year == release_year
+            })
+            .unwrap_or(false);
+
+        if should_remove {
+            removed_any = true;
+            continue;
+        }
+
+        kept.push(line);
+    }
+
+    if !removed_any {
+        return Ok(());
+    }
+
+    let mut new_content = kept.join("\n");
+    if !new_content.is_empty() {
+        new_content.push('\n');
+    }
+    fs::write(path, new_content).map_err(|err| err.to_string())
 }
