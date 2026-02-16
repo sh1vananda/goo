@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 
 type Movie = {
   id: number;
@@ -20,16 +21,30 @@ type EnrichedEntry = {
   poster_url?: string | null;
 };
 
+type Recommendation = {
+  title: string;
+  year: number;
+  director: string;
+  genres: string[];
+};
+
+type EnrichedRecommendation = Recommendation & {
+  poster_url?: string | null;
+  tmdb_url?: string | null;
+};
+
 type AppSettings = {
   log_path?: string | null;
   cache_path?: string | null;
   tmdb_key_present?: boolean | null;
+  nim_key_present?: boolean | null;
 };
 
 type SettingsInput = {
   log_path?: string | null;
   cache_path?: string | null;
   tmdb_api_key?: string | null;
+  nim_api_key?: string | null;
 };
 
 type HistoryPayload = {
@@ -110,6 +125,18 @@ function formatWatchDates(values: string[]) {
   };
 }
 
+function isTauriRuntime() {
+  return typeof window !== "undefined" && Boolean((window as any).__TAURI__);
+}
+
+async function openExternalLink(url: string) {
+  if (isTauriRuntime()) {
+    await open(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 export default function App() {
   const [entries, setEntries] = useState<EnrichedEntry[]>([]);
   const [warning, setWarning] = useState<string | null>(null);
@@ -119,13 +146,43 @@ export default function App() {
   const [cachePath, setCachePath] = useState("");
   const [tmdbApiKey, setTmdbApiKey] = useState("");
   const [tmdbKeyPresent, setTmdbKeyPresent] = useState(false);
+  const [nimApiKey, setNimApiKey] = useState("");
+  const [nimKeyPresent, setNimKeyPresent] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [busyAction, setBusyAction] = useState<"delete-log" | "delete-entry" | null>(null);
+  const [showRecsModal, setShowRecsModal] = useState(false);
+  const [busyAction, setBusyAction] = useState<"delete-log" | "delete-entry" | "get-recs" | null>(null);
+  const [recommendations, setRecommendations] = useState<EnrichedRecommendation[]>(() => {
+    const saved = localStorage.getItem("goo_recommendations");
+    try {
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [manualExclusions, setManualExclusions] = useState<string[]>(() => {
+    const saved = localStorage.getItem("goo_manual_exclusions");
+    const parsed = saved ? JSON.parse(saved) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  });
+  const [rawExclusionText, setRawExclusionText] = useState(manualExclusions.join(", "));
+
+  // Sync raw text when manual exclusions change from external actions (like marking as watched)
+  useEffect(() => {
+    const joined = manualExclusions.join(", ");
+    // Only update if the parsed content is different to avoid cursor jumps
+    const currentTitles = rawExclusionText.split(",").map(t => t.trim()).filter(t => t !== "");
+    if (JSON.stringify(currentTitles) !== JSON.stringify(manualExclusions)) {
+      setRawExclusionText(joined);
+    }
+  }, [manualExclusions]);
+
 
   const buildSettingsPayload = (overrides?: Partial<AppSettings>): SettingsInput => ({
     log_path: normalizeSetting(resolveSetting(overrides, "log_path", logPath)),
     cache_path: normalizeSetting(resolveSetting(overrides, "cache_path", cachePath)),
     tmdb_api_key: normalizeSetting(tmdbApiKey),
+    nim_api_key: normalizeSetting(nimApiKey),
   });
 
   const saveSettings = async () => {
@@ -153,6 +210,36 @@ export default function App() {
     }
   };
 
+  const getRecommendations = async () => {
+    setBusyAction("get-recs");
+    setError(null);
+    try {
+      // Merge log titles and manual exclusions for AI
+      const logTitles = Array.from(new Set(entries.map(e => e.cleaned_title)));
+      const exclusionList = Array.from(new Set([...logTitles, ...manualExclusions]));
+
+      const recs = await invoke<EnrichedRecommendation[]>("get_recommendations", {
+        exclusionList,
+        nimApiKey: normalizeSetting(nimApiKey) || (nimKeyPresent ? null : ""),
+        tmdbApiKey: normalizeSetting(tmdbApiKey) || (tmdbKeyPresent ? null : ""),
+      });
+
+      setRecommendations(recs);
+      localStorage.setItem("goo_recommendations", JSON.stringify(recs));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const addExclusion = (title: string) => {
+    const updated = Array.from(new Set([...manualExclusions, title]));
+    setManualExclusions(updated);
+    localStorage.setItem("goo_manual_exclusions", JSON.stringify(updated));
+  };
+
   useEffect(() => {
     const init = async () => {
       try {
@@ -160,7 +247,9 @@ export default function App() {
         setLogPath(settings.log_path ?? "");
         setCachePath(settings.cache_path ?? "");
         setTmdbKeyPresent(Boolean(settings.tmdb_key_present));
+        setNimKeyPresent(Boolean(settings.nim_key_present));
         setTmdbApiKey("");
+        setNimApiKey("");
         await loadHistory(settings);
       } catch {
         await loadHistory();
@@ -204,6 +293,15 @@ export default function App() {
         <div className="header-actions">
           <button
             className="icon-button"
+            onClick={() => setShowRecsModal(true)}
+            title="Curator Recommendations"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+            </svg>
+          </button>
+          <button
+            className="icon-button"
             onClick={() => setShowSettings(true)}
             title="Settings"
           >
@@ -215,11 +313,19 @@ export default function App() {
           </button>
           <button
             className="icon-button"
-            onClick={loadHistory}
+            onClick={() => loadHistory()}
             disabled={status === "loading"}
-            title="Refresh"
+            title="Refresh History"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              className={status === "loading" ? "spin" : ""}
+            >
               <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
             </svg>
           </button>
@@ -261,16 +367,27 @@ export default function App() {
                   placeholder={tmdbKeyPresent ? "Saved in Windows Credential Manager" : "Optional (or set TMDB_API_KEY env)"}
                 />
               </label>
+              <label className="field">
+                <span>NVIDIA NIM API Key</span>
+                <input
+                  type="password"
+                  value={nimApiKey}
+                  onChange={(event) => setNimApiKey(event.target.value)}
+                  placeholder={nimKeyPresent ? "Saved in Windows Credential Manager" : "Required for recommendations"}
+                />
+              </label>
             </div>
             <div className="modal-footer">
-              {tmdbKeyPresent && (
+              {(tmdbKeyPresent || nimKeyPresent) && (
                 <button
                   className="secondary"
                   onClick={() => {
-                    invoke("clear_tmdb_key")
+                    invoke("clear_keys")
                       .then(() => {
                         setTmdbKeyPresent(false);
+                        setNimKeyPresent(false);
                         setTmdbApiKey("");
+                        setNimApiKey("");
                       })
                       .catch(err => {
                         const message = err instanceof Error ? err.message : String(err);
@@ -279,7 +396,7 @@ export default function App() {
                       });
                   }}
                 >
-                  Clear Key
+                  Clear Keys
                 </button>
               )}
               <button
@@ -320,6 +437,10 @@ export default function App() {
                         setTmdbKeyPresent(true);
                         setTmdbApiKey("");
                       }
+                      if (nimApiKey.trim()) {
+                        setNimKeyPresent(true);
+                        setNimApiKey("");
+                      }
                       return loadHistory();
                     })
                     .catch(err => {
@@ -350,7 +471,137 @@ export default function App() {
         <div className="status">Loading your latest plays.</div>
       )}
 
-      {status !== "loading" && items.length === 0 && (
+      {showRecsModal && (
+        <div className="modal-overlay" onClick={() => setShowRecsModal(false)}>
+          <div className="modal recs-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title-block">
+                <h2>Recommendations</h2>
+                <div className="reco-status">
+                  {busyAction === "get-recs" ? (
+                    <span className="curating">Fetching new insights...</span>
+                  ) : recommendations.length === 0 ? (
+                    <span>Add to your history for new insights.</span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="modal-header-actions">
+                <button
+                  className="icon-button"
+                  onClick={getRecommendations}
+                  disabled={busyAction === "get-recs"}
+                  title="Refresh Recommendations"
+                >
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    className={busyAction === "get-recs" ? "spin" : ""}
+                  >
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+                  </svg>
+                </button>
+                <button className="close-button" onClick={() => setShowRecsModal(false)}>
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="recs-layout">
+              <aside className="recs-sidebar">
+                <div className="sidebar-section">
+                  <h3>Exclusion List</h3>
+                  <textarea
+                    className="exclusion-textarea"
+                    value={rawExclusionText}
+                    onChange={(e) => {
+                      const text = e.target.value;
+                      setRawExclusionText(text);
+                      const titles = text.split(",")
+                        .map(t => t.trim())
+                        .filter(t => t !== "");
+                      setManualExclusions(titles);
+                      localStorage.setItem("goo_manual_exclusions", JSON.stringify(titles));
+                    }}
+                    placeholder="Titles separated by commas..."
+                  />
+                  <span className="hint">Comma separated list of titles the AI will never suggest, but will use to fuel better fits.</span>
+                </div>
+              </aside>
+
+              <div className="recs-body">
+                {recommendations.length > 0 ? (
+                  <div className="recs-grid">
+                    {recommendations.map((rec, index) => {
+                      const title = rec.title;
+                      const tmdbLink = rec.tmdb_url || `https://www.themoviedb.org/search?query=${encodeURIComponent(title)}`;
+                      return (
+                        <article className="card reco-card" key={`${title}-${index}`}>
+                          <div
+                            className="poster"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              if (isTauriRuntime()) {
+                                openExternalLink(tmdbLink).catch(() => { });
+                              } else {
+                                window.open(tmdbLink, "_blank", "noopener,noreferrer");
+                              }
+                            }}
+                          >
+                            {rec.poster_url ? (
+                              <img src={rec.poster_url} alt={`${title} poster`} />
+                            ) : (
+                              <div className="poster-fallback">
+                                <span>{title}</span>
+                              </div>
+                            )}
+                            <div className="poster-overlay">
+                              <button
+                                className="mark-watched-icon"
+                                title="Mark as watched and remove"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  addExclusion(title);
+                                  setRecommendations(prev => prev.filter((_, i) => i !== index));
+                                }}
+                              >
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
+                          <div className="card-body">
+                            <div className="title-row">
+                              <h3 title={title}>{title}</h3>
+                              <span className="badge">{rec.year}</span>
+                            </div>
+                            <div className="director">{rec.director}</div>
+                            <div className="reco-genres">
+                              {rec.genres?.map((g, i) => (
+                                <span key={i} className="genre-tag">{g}</span>
+                              ))}
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="status empty">
+                    {busyAction === "get-recs" ? "Selecting titles..." : "Consult the curator for elite suggestions."}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {status === "idle" && items.length === 0 && (
         <div className="status empty">No history yet. Play something in VLC.</div>
       )}
 
@@ -361,6 +612,7 @@ export default function App() {
           const year = entry.release_year ?? releaseYear(entry.movie?.release_date ?? null);
           const dateInfo = formatWatchDates(item.watch_dates);
           const dateTitle = dateInfo.full !== dateInfo.text ? dateInfo.full : undefined;
+          const dateTooltip = dateTitle ?? undefined;
           const tmdbLink =
             entry.tmdb_url ??
             `https://www.themoviedb.org/search?query=${encodeURIComponent(
@@ -370,7 +622,18 @@ export default function App() {
 
           return (
             <article className="card" key={`${entry.raw_title}-${index}`}>
-              <a className="poster" href={tmdbLink} target="_blank" rel="noreferrer">
+              <a
+                className="poster"
+                href={tmdbLink}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(event) => {
+                  if (isTauriRuntime()) {
+                    event.preventDefault();
+                    openExternalLink(tmdbLink).catch(() => { });
+                  }
+                }}
+              >
                 {poster ? (
                   <img src={poster} alt={`${title} poster`} loading="lazy" />
                 ) : (
@@ -386,18 +649,33 @@ export default function App() {
                   {year && <span className="badge">{year}</span>}
                 </div>
                 <div className="meta">
-                  <span className="meta-item" title={dateTitle}>
+                  <span
+                    className={dateTooltip ? "meta-item tooltip" : "meta-item"}
+                    data-tooltip={dateTooltip}
+                  >
                     {dateInfo.text}
                   </span>
                   <div className="meta-actions">
-                    <a className="tmdb-link" href={tmdbLink} target="_blank" rel="noreferrer">
+                    <a
+                      className="tmdb-link"
+                      href={tmdbLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => {
+                        if (isTauriRuntime()) {
+                          event.preventDefault();
+                          openExternalLink(tmdbLink).catch(() => { });
+                        }
+                      }}
+                    >
                       TMDB
                     </a>
                     <button
                       className="meta-button"
                       onClick={async () => {
+                        addExclusion(entry.cleaned_title);
                         const ok = window.confirm(
-                          "Remove this title (all watch dates) from your history?"
+                          "Remove this title from your history?"
                         );
                         if (!ok) return;
                         setBusyAction("delete-entry");
@@ -411,13 +689,12 @@ export default function App() {
                         } catch (err) {
                           const message = err instanceof Error ? err.message : String(err);
                           setError(message);
-                          setStatus("error");
                         } finally {
                           setBusyAction(null);
                         }
                       }}
                       disabled={busyAction !== null}
-                      title="Remove from history"
+                      title="Remove and mark as watched"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M3 6h18" />

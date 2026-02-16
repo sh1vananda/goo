@@ -21,6 +21,7 @@ struct SettingsPayload {
     log_path: Option<String>,
     cache_path: Option<String>,
     tmdb_key_present: bool,
+    nim_key_present: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -28,6 +29,7 @@ struct SettingsInput {
     log_path: Option<String>,
     cache_path: Option<String>,
     tmdb_api_key: Option<String>,
+    nim_api_key: Option<String>,
 }
 
 #[tauri::command]
@@ -58,10 +60,12 @@ fn load_history(
 fn load_settings() -> Result<SettingsPayload, String> {
     let settings = read_settings();
     let tmdb_key_present = read_tmdb_key().is_some();
+    let nim_key_present = read_nim_key().is_some();
     Ok(SettingsPayload {
         log_path: settings.log_path,
         cache_path: settings.cache_path,
         tmdb_key_present,
+        nim_key_present,
     })
 }
 
@@ -75,12 +79,17 @@ fn save_settings(settings: SettingsInput) -> Result<(), String> {
     if let Some(key) = settings.tmdb_api_key.and_then(normalize_key) {
         store_tmdb_key(&key)?;
     }
+    if let Some(key) = settings.nim_api_key.and_then(normalize_key) {
+        store_nim_key(&key)?;
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn clear_tmdb_key() -> Result<(), String> {
-    delete_tmdb_key()
+fn clear_keys() -> Result<(), String> {
+    let _ = delete_tmdb_key();
+    let _ = delete_nim_key();
+    Ok(())
 }
 
 #[tauri::command]
@@ -88,6 +97,30 @@ fn delete_log(log_path: Option<String>) -> Result<(), String> {
     let settings = read_settings();
     let log_path = resolve_log_path(log_path.or(settings.log_path))?;
     delete_log_file(&log_path)
+}
+
+#[tauri::command]
+fn get_recommendations(
+    exclusion_list: Vec<String>,
+    nim_api_key: Option<String>,
+    tmdb_api_key: Option<String>,
+) -> Result<Vec<goo::nim::EnrichedRecommendation>, String> {
+    let api_key = nim_api_key
+        .and_then(normalize_key)
+        .or_else(read_nim_key)
+        .ok_or_else(|| "NIM API key not found. Set it in Settings.".to_string())?;
+    
+    let tmdb_key = tmdb_api_key
+        .and_then(normalize_key)
+        .or_else(read_tmdb_key);
+    
+    let tmdb_client = if let Some(key) = tmdb_key {
+        goo::tmdb::TmdbClient::new(key)
+    } else {
+        goo::tmdb::TmdbClient::from_env().map_err(|e| e.to_string())?
+    };
+
+    goo::nim::get_recommendations(&api_key, exclusion_list, &tmdb_client)
 }
 
 #[tauri::command]
@@ -198,8 +231,39 @@ fn delete_tmdb_key() -> Result<(), String> {
     entry.delete_password().map_err(|err| err.to_string())
 }
 
+#[cfg(target_os = "windows")]
+fn read_nim_key() -> Option<String> {
+    let entry = keyring::Entry::new("goo", "nim_api_key").ok()?;
+    match entry.get_password() {
+        Ok(value) => normalize_key(value),
+        Err(_) => None,
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
-fn delete_tmdb_key() -> Result<(), String> {
+fn read_nim_key() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn store_nim_key(value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "nim_api_key").map_err(|err| err.to_string())?;
+    entry.set_password(value).map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn store_nim_key(_value: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_nim_key() -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "nim_api_key").map_err(|err| err.to_string())?;
+    entry.delete_password().map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn delete_nim_key() -> Result<(), String> {
     Ok(())
 }
 
@@ -316,6 +380,7 @@ fn is_setting_line(line: &str, key: &str) -> bool {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .setup(|_| {
             if let Err(err) = install_vlc_logger() {
                 eprintln!("Failed to install VLC logger: {err}");
@@ -326,9 +391,10 @@ fn main() {
             load_history,
             load_settings,
             save_settings,
-            clear_tmdb_key,
+            clear_keys,
             delete_log,
-            delete_entry
+            delete_entry,
+            get_recommendations
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

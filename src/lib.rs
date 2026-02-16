@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 pub mod tmdb;
 pub mod enrich;
 pub mod app;
+pub mod nim;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchEntry {
