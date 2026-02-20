@@ -48,7 +48,9 @@ pub fn enrich_entries(
         } else if let Some(cached) = cache.entries.get(&key) {
             cached.clone()
         } else {
-            let fetched = client.best_match(&entry.cleaned_title, entry.release_year)?;
+            let fetched = client
+                .best_match(&entry.cleaned_title, entry.release_year)
+                .unwrap_or(None);
             cache.entries.insert(key, fetched.clone());
             fetched
         };

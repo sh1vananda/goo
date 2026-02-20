@@ -50,7 +50,11 @@ impl TmdbClient {
         Ok(Self::new(key))
     }
 
-    pub fn search_movie(&self, title: &str, year: Option<i32>) -> Result<Vec<TmdbMovie>, TmdbError> {
+    pub fn search_movie(
+        &self,
+        title: &str,
+        year: Option<i32>,
+    ) -> Result<Vec<TmdbMovie>, TmdbError> {
         let trimmed = title.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
@@ -60,7 +64,8 @@ impl TmdbClient {
             .set("Accept", "application/json")
             .query("api_key", &self.api_key)
             .query("query", trimmed)
-            .query("include_adult", "false");
+            .query("include_adult", "false")
+            .timeout(std::time::Duration::from_secs(10));
 
         if let Some(year) = year {
             request = request.query("year", &year.to_string());
@@ -82,7 +87,11 @@ impl TmdbClient {
         Ok(parsed.results)
     }
 
-    pub fn best_match(&self, title: &str, year: Option<i32>) -> Result<Option<TmdbMovie>, TmdbError> {
+    pub fn best_match(
+        &self,
+        title: &str,
+        year: Option<i32>,
+    ) -> Result<Option<TmdbMovie>, TmdbError> {
         Ok(self.search_movie(title, year)?.into_iter().next())
     }
 }

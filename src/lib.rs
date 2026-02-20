@@ -2,10 +2,10 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::OnceLock;
 
-pub mod tmdb;
-pub mod enrich;
 pub mod app;
+pub mod enrich;
 pub mod nim;
+pub mod tmdb;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchEntry {
@@ -32,7 +32,7 @@ fn cleaners() -> &'static Cleaners {
         )
         .expect("valid audio channel regex"),
         fluff: Regex::new(
-            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|x264|x265|h264|h265|hevc|aac\d*\.?\d*|ac3|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|hdr10\+|dvdrip|remux|proper|repack|extended|uncut|10bit|8bit|yify|rarbg|yts|mx|etrg|pahe|tigole|qxr|joy|sparks)\b",
+            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|x264|x265|h264|h265|hevc|aac\d*\.?\d*|ac3|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|hdr10\+|dvdrip|remux|proper|repack|extended|uncut|10bit|8bit|yify|rarbg|yts|mx|etrg|pahe|tigole|qxr|joy|sparks|mkv|mp4|avi|wmv|flv|mov|webm|mpg|mpeg|m4v|ts)\b",
         )
         .expect("valid fluff regex"),
         separators: Regex::new(r"[._-]+").expect("valid separator regex"),
@@ -81,15 +81,15 @@ pub fn clean_title(raw: &str) -> String {
 fn clean_title_and_year(raw: &str) -> (String, Option<i32>) {
     let cleaners = cleaners();
     let mut value = raw.trim().to_string();
-    
+
     value = cleaners.bracketed.replace_all(&value, " ").to_string();
-    
+
     // Process fluff BEFORE separators
     value = cleaners.audio_channels.replace_all(&value, " ").to_string();
     value = cleaners.fluff.replace_all(&value, " ").to_string();
     value = cleaners.separators.replace_all(&value, " ").to_string();
     value = cleaners.whitespace.replace_all(&value, " ").to_string();
-    
+
     let tokens: Vec<&str> = value.split_whitespace().collect();
     if tokens.is_empty() {
         return (String::new(), None);
@@ -111,10 +111,18 @@ fn clean_title_and_year(raw: &str) -> (String, Option<i32>) {
             if last_idx != 0 {
                 keep[last_idx] = false;
                 release_year = tokens[last_idx].parse::<i32>().ok();
+                // Discard everything after the year (release group, residual metadata)
+                for i in (last_idx + 1)..tokens.len() {
+                    keep[i] = false;
+                }
             }
         } else {
             keep[last_idx] = false;
             release_year = tokens[last_idx].parse::<i32>().ok();
+            // Discard everything after the last year token
+            for i in (last_idx + 1)..tokens.len() {
+                keep[i] = false;
+            }
         }
     }
 
@@ -213,8 +221,7 @@ mod tests {
 
     #[test]
     fn parses_tab_delimited_log_lines() {
-        let entry = parse_log_line("2025-01-01T10:00:00Z\tAlien.1979.720p.mkv")
-            .expect("entry");
+        let entry = parse_log_line("2025-01-01T10:00:00Z\tAlien.1979.720p.mkv").expect("entry");
         assert_eq!(entry.watched_at.as_deref(), Some("2025-01-01T10:00:00Z"));
         assert_eq!(entry.cleaned_title, "Alien");
     }
@@ -222,5 +229,14 @@ mod tests {
     #[test]
     fn ignores_blank_lines() {
         assert!(parse_log_line("   ").is_none());
+    }
+
+    #[test]
+    fn strips_release_group_after_year() {
+        let (cleaned, year) = clean_title_and_year(
+            "28.Years.Later.The.Bone.Temple.2026.1080p.WEBRip.10Bit.DDP.5.1.x265-NeoNoir",
+        );
+        assert_eq!(cleaned, "28 Years Later The Bone Temple");
+        assert_eq!(year, Some(2026));
     }
 }

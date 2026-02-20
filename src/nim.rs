@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::tmdb::TmdbClient;
+use serde::{Deserialize, Serialize};
 
 const NIM_API_BASE: &str = "https://integrate.api.nvidia.com/v1";
 const MIN_MODEL: &str = "qwen/qwen3-next-80b-a3b-instruct";
@@ -64,62 +64,98 @@ pub fn get_recommendations(
     tmdb_client: &TmdbClient,
 ) -> Result<Vec<EnrichedRecommendation>, String> {
     let exclusion_str = exclusion_list.join(", ");
-    
-    let system_prompt = r#"You are an elitist, hyper-literate cinema curator. Your objective is to recommend films that possess profound psychological depth and formalist ambition.
 
-### Core Philosophy:
-- Prioritize "Auteur Cinema" (directors with singular visual/thematic language).
-- Reject "Mainstream Slop" (predictable narrative arcs, commercial safety).
-- Value Complexity over Catharsis.
+    let system_prompt = format!(
+        r#"You are a cinema curator. Recommend films with psychological depth and artistic ambition.
 
-### Output Constraints:
-- Return ONLY a valid JSON array containing EXACTLY 5 objects.
-- Schema: [{"title": string, "year": number, "director": string, "genres": string[]}].
-- Ensure genres are accurate but concise (e.g., "Psychological Horror", "Neo-Noir")."#;
+### Guidelines:
+- Favor auteur cinema, bold formal choices, and thematic complexity.
+- Avoid mainstream blockbusters and formulaic crowd-pleasers.
+- Be diverse: vary decades, countries, languages, and genres across your picks.
+- Surprise the user. Do NOT repeat safe or obvious choices.
 
-    let user_prompt = format!(
-        "STRICTLY EXCLUDE these titles from your suggestions: [{}].\n\nCurate 5 niche recommendations based on my archive philosophy. Return as a JSON array.",
-        exclusion_str
+### User's Watch History (ANALYZE for taste, but NEVER recommend any of these):
+[{exclusions}]
+
+Study the titles above to understand the user's taste — identify patterns in their preferred directors, genres, themes, and eras. Use these insights to guide your recommendations toward films they would love but haven't discovered yet. However, you MUST NOT recommend any title from this list. This is a hard constraint.
+
+### Output format:
+- Return ONLY a valid JSON array with EXACTLY 8 objects. No other text.
+- Schema: [{{"title": string, "year": number, "director": string, "genres": string[]}}]
+- Genres should be concise (e.g. "Psychological Horror", "Neo-Noir").
+- Every film must be real and verifiable."#,
+        exclusions = exclusion_str,
     );
+
+    let user_prompt =
+        "Give me 8 fresh, unexpected recommendations I haven't seen. Return ONLY the JSON array."
+            .to_string();
 
     let request_body = NimRequest {
         model: MIN_MODEL.to_string(),
         messages: vec![
-            NimMessage { role: "system".to_string(), content: system_prompt.to_string() },
-            NimMessage { role: "user".to_string(), content: user_prompt },
+            NimMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+            },
+            NimMessage {
+                role: "user".to_string(),
+                content: user_prompt,
+            },
         ],
-        temperature: 0.7, // Slightly higher for more variety
-        top_p: 0.7,
+        temperature: 1.0,
+        top_p: 0.95,
         max_tokens: 4096,
-        response_format: None, // Explicitly letting the prompt handle it to avoid single-object enforcement
+        response_format: None,
     };
 
     let response = ureq::post(&format!("{}/chat/completions", NIM_API_BASE))
         .set("Authorization", &format!("Bearer {}", api_key))
         .set("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
         .send_json(&request_body)
         .map_err(|e| format!("NIM request failed: {}", e))?;
 
-    let nim_res: NimResponse = response.into_json().map_err(|e| format!("Failed to parse NIM response: {}", e))?;
-    let content = nim_res.choices.first()
+    let nim_res: NimResponse = response
+        .into_json()
+        .map_err(|e| format!("Failed to parse NIM response: {}", e))?;
+    let content = nim_res
+        .choices
+        .first()
         .map(|c| c.message.content.clone())
         .ok_or("Empty NIM response")?;
 
-    // AI might wrap JSON in backticks, clean it
-    let clean_json = content.trim_start_matches("```json").trim_end_matches("```").trim();
-    
-    let recommendations: Vec<Recommendation> = if clean_json.starts_with('[') {
-        serde_json::from_str(clean_json)
-            .map_err(|e| format!("Failed to parse array: {}. Content: {}", e, clean_json))?
-    } else {
-        let single: Recommendation = serde_json::from_str(clean_json)
-            .map_err(|e| format!("Failed to parse object: {}. Content: {}", e, clean_json))?;
-        vec![single]
-    };
+    let clean_json = extract_json_array(&content)
+        .ok_or_else(|| format!("No JSON array found in response: {}", content))?;
+
+    let mut recommendations: Vec<Recommendation> =
+        serde_json::from_str(&clean_json).map_err(|e| {
+            format!(
+                "Failed to parse recommendations: {}. Content: {}",
+                e, clean_json
+            )
+        })?;
+
+    // Hard filter: remove any recommendation that matches the exclusion list
+    let excluded_lower: Vec<String> = exclusion_list
+        .iter()
+        .map(|t| t.trim().to_lowercase())
+        .collect();
+    recommendations.retain(|rec| {
+        let title_lower = rec.title.trim().to_lowercase();
+        !excluded_lower.iter().any(|ex| title_lower == *ex)
+    });
+
+    // Cap at 5
+    recommendations.truncate(5);
 
     let mut enriched = Vec::new();
     for rec in recommendations {
-        let movie = tmdb_client.best_match(&rec.title, Some(rec.year as i32)).ok().flatten();
+        // Graceful TMDB: don't fail the batch if one lookup errors
+        let movie = tmdb_client
+            .best_match(&rec.title, Some(rec.year as i32))
+            .ok()
+            .flatten();
         enriched.push(EnrichedRecommendation {
             poster_url: movie.as_ref().and_then(|m| m.poster_url("w342")),
             tmdb_url: movie.map(|m| m.tmdb_url()),
@@ -128,4 +164,49 @@ pub fn get_recommendations(
     }
 
     Ok(enriched)
+}
+
+/// Extracts the first JSON array from a string, handling common AI quirks:
+/// - `<think>...</think>` reasoning blocks
+/// - Triple-backtick markdown fences (```json ... ```)
+/// - Extra text before/after the array
+fn extract_json_array(raw: &str) -> Option<String> {
+    let mut text = raw.to_string();
+
+    // Strip <think>...</think> blocks (some models emit reasoning)
+    while let Some(start) = text.find("<think>") {
+        if let Some(end) = text.find("</think>") {
+            text = format!("{}{}", &text[..start], &text[end + "</think>".len()..]);
+        } else {
+            // Unclosed <think>, strip from start onwards
+            text = text[..start].to_string();
+            break;
+        }
+    }
+
+    // Strip markdown code fences
+    let text = text
+        .replace("```json", "")
+        .replace("```JSON", "")
+        .replace("```", "");
+
+    let text = text.trim();
+
+    // Find the outermost [ ... ] pair
+    let start = text.find('[')?;
+    let mut depth = 0;
+    for (i, ch) in text[start..].char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..=start + i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }

@@ -104,25 +104,10 @@ function formatWatchDates(values: string[]) {
   if (values.length === 0) {
     return { text: "Date unknown", full: "" };
   }
-  const unique: string[] = [];
-  const seen = new Set<string>();
-  values.forEach(value => {
-    if (!seen.has(value)) {
-      seen.add(value);
-      unique.push(value);
-    }
-  });
-  const formatted = unique.map(formatDate);
-  if (formatted.length <= 2) {
-    const text = formatted.join(" · ");
-    return { text, full: text };
-  }
-  const visible = formatted.slice(0, 2);
-  const remaining = formatted.length - 2;
-  return {
-    text: `${visible.join(" · ")} · +${remaining} more`,
-    full: formatted.join(" · "),
-  };
+  // Only display the most recent date
+  const latest = values[values.length - 1];
+  const text = formatDate(latest);
+  return { text, full: text };
 }
 
 function isTauriRuntime() {
@@ -267,9 +252,10 @@ export default function App() {
       const key = `${entry.cleaned_title.toLowerCase()}${year ? `|${year}` : ""}`;
       const existing = byKey.get(key);
       if (existing) {
+        // Rewatch: replace the date with the more recent one
         const watched = entry.watched_at;
-        if (watched && !existing.watch_dates.includes(watched)) {
-          existing.watch_dates.push(watched);
+        if (watched) {
+          existing.watch_dates = [watched];
         }
         return;
       }
