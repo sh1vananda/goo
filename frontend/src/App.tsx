@@ -659,11 +659,11 @@ export default function App() {
                     <button
                       className="meta-button"
                       onClick={async () => {
-                        addExclusion(entry.cleaned_title);
                         const ok = window.confirm(
                           "Remove this title from your history?"
                         );
                         if (!ok) return;
+                        addExclusion(entry.cleaned_title);
                         setBusyAction("delete-entry");
                         try {
                           await invoke("delete_entry", {
