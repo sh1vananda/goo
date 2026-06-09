@@ -205,8 +205,8 @@ export default function App() {
 
       const recs = await invoke<EnrichedRecommendation[]>("get_recommendations", {
         exclusionList,
-        nimApiKey: normalizeSetting(nimApiKey) || (nimKeyPresent ? null : ""),
-        tmdbApiKey: normalizeSetting(tmdbApiKey) || (tmdbKeyPresent ? null : ""),
+        nimApiKey: normalizeSetting(nimApiKey) || null,
+        tmdbApiKey: normalizeSetting(tmdbApiKey) || null,
       });
 
       setRecommendations(recs);
