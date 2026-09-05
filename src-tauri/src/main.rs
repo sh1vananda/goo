@@ -59,8 +59,11 @@ fn load_history(
 #[tauri::command]
 fn load_settings() -> Result<SettingsPayload, String> {
     let settings = read_settings();
-    let tmdb_key_present = read_tmdb_key().is_some();
-    let nim_key_present = read_nim_key().is_some();
+    let tmdb_key_present = read_tmdb_key().is_some()
+        || std::env::var("TMDB_API_KEY").ok().and_then(normalize_key).is_some();
+    let nim_key_present = read_nim_key().is_some()
+        || std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key).is_some()
+        || std::env::var("NIM_API_KEY").ok().and_then(normalize_key).is_some();
     Ok(SettingsPayload {
         log_path: settings.log_path,
         cache_path: settings.cache_path,
@@ -108,7 +111,9 @@ fn get_recommendations(
     let api_key = nim_api_key
         .and_then(normalize_key)
         .or_else(read_nim_key)
-        .ok_or_else(|| "NIM API key not found. Set it in Settings.".to_string())?;
+        .or_else(|| std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key))
+        .or_else(|| std::env::var("NIM_API_KEY").ok().and_then(normalize_key))
+        .ok_or_else(|| "NIM API key not found. Set it in Settings or via NVIDIA_API_KEY.".to_string())?;
     
     let tmdb_key = tmdb_api_key
         .and_then(normalize_key)

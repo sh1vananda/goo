@@ -2,7 +2,7 @@ use crate::tmdb::TmdbClient;
 use serde::{Deserialize, Serialize};
 
 const NIM_API_BASE: &str = "https://integrate.api.nvidia.com/v1";
-const NIM_MODEL: &str = "qwen/qwen3-next-80b-a3b-instruct";
+const NIM_MODEL: &str = "google/diffusiongemma-26b-a4b-it";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Recommendation {
@@ -21,13 +21,20 @@ pub struct EnrichedRecommendation {
 }
 
 #[derive(Debug, Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct NimRequest {
     model: String,
     messages: Vec<NimMessage>,
     temperature: f32,
     top_p: f32,
     max_tokens: u32,
-    #[serde(rename = "response_format")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
+    #[serde(rename = "response_format", skip_serializing_if = "Option::is_none")]
     response_format: Option<ResponseFormat>,
 }
 
@@ -105,18 +112,31 @@ Study the titles above with care. Identify recurring patterns in directors, them
                 content: user_prompt,
             },
         ],
-        temperature: 0.8,
+        temperature: 1.0,
         top_p: 0.95,
         max_tokens: 4096,
+        chat_template_kwargs: Some(ChatTemplateKwargs {
+            enable_thinking: true,
+        }),
         response_format: None,
     };
 
     let response = ureq::post(&format!("{}/chat/completions", NIM_API_BASE))
         .set("Authorization", &format!("Bearer {}", api_key))
         .set("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(30))
+        .set("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(60))
         .send_json(&request_body)
-        .map_err(|e| format!("NIM request failed: {}", e))?;
+        .map_err(|e| match e {
+            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+                "NIM request failed: status code 403 (Forbidden / Authorization failed). Your NVIDIA API key may be invalid, expired, or out of free credits. Please generate a new key at build.nvidia.com and update it in Settings or via NVIDIA_API_KEY.".to_string()
+            }
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                format!("NIM request failed: status code {}: {}", code, body)
+            }
+            ureq::Error::Transport(err) => format!("NIM transport error: {}", err),
+        })?;
 
     let nim_res: NimResponse = response
         .into_json()
@@ -187,6 +207,26 @@ fn extract_json(raw: &str) -> Option<String> {
     while let Some(start) = text.find("<think>") {
         if let Some(end) = text.find("</think>") {
             text = format!("{}{}", &text[..start], &text[end + "</think>".len()..]);
+        } else {
+            text = text[..start].to_string();
+            break;
+        }
+    }
+
+    // Strip <|channel>thought ... <channel|> blocks (DiffusionGemma reasoning format)
+    while let Some(start) = text.find("<|channel>thought") {
+        if let Some(end) = text.find("<channel|>") {
+            text = format!("{}{}", &text[..start], &text[end + "<channel|>".len()..]);
+        } else {
+            text = text[..start].to_string();
+            break;
+        }
+    }
+
+    // Strip <thought>...</thought> blocks
+    while let Some(start) = text.find("<thought>") {
+        if let Some(end) = text.find("</thought>") {
+            text = format!("{}{}", &text[..start], &text[end + "</thought>".len()..]);
         } else {
             text = text[..start].to_string();
             break;
@@ -355,5 +395,25 @@ mod tests {
         let malformed = "[{\"title\":\"A\"}] [{\"title\":\"B\"}]";
         let repaired = extract_json(malformed).unwrap();
         assert_eq!(repaired, "[{\"title\":\"A\"}]");
+    }
+
+    #[test]
+    fn test_extract_diffusiongemma_channel_thought() {
+        let input = "<|channel>thought\nLet me curate dark films: [{\"title\":\"Draft\"}]\n<channel|>\n[{\"title\":\"Inland Empire\",\"year\":2006,\"director\":\"David Lynch\",\"genres\":[\"Surrealist Horror\"]}]";
+        let extracted = extract_json(input).unwrap();
+        assert_eq!(
+            extracted,
+            "[{\"title\":\"Inland Empire\",\"year\":2006,\"director\":\"David Lynch\",\"genres\":[\"Surrealist Horror\"]}]"
+        );
+    }
+
+    #[test]
+    fn test_extract_thought_tags() {
+        let input = "<thought>Drafting response with {json: false}</thought>[{\"title\":\"Possession\",\"year\":1981,\"director\":\"Andrzej Żuławski\",\"genres\":[\"Body Horror\"]}]";
+        let extracted = extract_json(input).unwrap();
+        assert_eq!(
+            extracted,
+            "[{\"title\":\"Possession\",\"year\":1981,\"director\":\"Andrzej Żuławski\",\"genres\":[\"Body Horror\"]}]"
+        );
     }
 }

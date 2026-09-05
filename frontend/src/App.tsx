@@ -447,9 +447,16 @@ export default function App() {
       {error && (
         <div className="banner error">
           {error}
-          <span className="hint">
-            If this mentions TMDB, set a key in Settings or via TMDB_API_KEY.
-          </span>
+          {error.toLowerCase().includes("tmdb") && (
+            <span className="hint">
+              Set a key in Settings or via TMDB_API_KEY.
+            </span>
+          )}
+          {error.toLowerCase().includes("nim") && (
+            <span className="hint">
+              Set or update your NVIDIA key in Settings or via NVIDIA_API_KEY.
+            </span>
+          )}
         </div>
       )}
 
