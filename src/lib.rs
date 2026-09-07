@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 
 pub mod app;
 pub mod enrich;
+pub mod gemini;
 pub mod nim;
 pub mod tmdb;
 
@@ -32,7 +33,7 @@ fn cleaners() -> &'static Cleaners {
         )
         .expect("valid audio channel regex"),
         fluff: Regex::new(
-            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|x264|x265|h264|h265|hevc|aac\d*\.?\d*|ac3|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|hdr10\+|dvdrip|remux|proper|repack|extended|uncut|10bit|8bit|yify|rarbg|yts|mx|etrg|pahe|tigole|qxr|joy|sparks|mkv|mp4|avi|wmv|flv|mov|webm|mpg|mpeg|m4v|ts)\b",
+            r"(?i)\b(480p|720p|1080p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|aac\d*\.?\d*|ac3|dts|truehd|atmos|bluray|brrip|webrip|web-dl|hdr|hdr10|hdr10\+|dvdrip|remux|proper|repack|extended|uncut|remastered|criterion|imax|hdtv|pdtv|10bit|8bit|yify|rarbg|yts|mx|etrg|pahe|tigole|qxr|joy|sparks|mkv|mp4|avi|wmv|flv|mov|webm|mpg|mpeg|m4v|ts)\b",
         )
         .expect("valid fluff regex"),
         separators: Regex::new(r"[._-]+").expect("valid separator regex"),
@@ -196,6 +197,12 @@ mod tests {
     fn cleans_common_fluff() {
         let cleaned = clean_title("Dune.2021.1080p.BluRay.x264.DTS.mkv");
         assert_eq!(cleaned, "Dune");
+    }
+
+    #[test]
+    fn cleans_criterion_and_uhd_fluff() {
+        let cleaned = clean_title("Seven.Samurai.1954.Criterion.Remastered.UHD.mkv");
+        assert_eq!(cleaned, "Seven Samurai");
     }
 
     #[test]

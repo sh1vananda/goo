@@ -14,6 +14,12 @@ struct HistoryPayload {
 struct StoredSettings {
     log_path: Option<String>,
     cache_path: Option<String>,
+    #[serde(default)]
+    manual_exclusions: Vec<String>,
+    #[serde(default)]
+    ai_provider: Option<String>,
+    #[serde(default)]
+    nim_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -22,6 +28,10 @@ struct SettingsPayload {
     cache_path: Option<String>,
     tmdb_key_present: bool,
     nim_key_present: bool,
+    gemini_key_present: bool,
+    manual_exclusions: Vec<String>,
+    ai_provider: String,
+    nim_model: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -30,30 +40,39 @@ struct SettingsInput {
     cache_path: Option<String>,
     tmdb_api_key: Option<String>,
     nim_api_key: Option<String>,
+    gemini_api_key: Option<String>,
+    manual_exclusions: Option<Vec<String>>,
+    ai_provider: Option<String>,
+    nim_model: Option<String>,
 }
 
 #[tauri::command]
-fn load_history(
+async fn load_history(
     log_path: Option<String>,
     cache_path: Option<String>,
     tmdb_api_key: Option<String>,
 ) -> Result<HistoryPayload, String> {
-    let settings = read_settings();
-    let log_path = resolve_log_path(log_path.or(settings.log_path))?;
-    let cache_path = cache_path.or(settings.cache_path);
-    let api_key = tmdb_api_key
-        .and_then(normalize_key)
-        .or_else(read_tmdb_key);
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = read_settings();
+        let log_path = resolve_log_path(log_path.or(settings.log_path))?;
+        let cache_path = cache_path.or(settings.cache_path);
+        let api_key = tmdb_api_key
+            .and_then(normalize_key)
+            .or_else(read_tmdb_key)
+            .or_else(|| std::env::var("TMDB_API_KEY").ok().and_then(normalize_key));
 
-    let cache_path = cache_path.as_deref().map(Path::new);
-    let api_key = api_key.as_deref();
-    let history =
-        goo::app::load_enriched_history(&log_path, cache_path, api_key).map_err(|err| err.to_string())?;
+        let cache_path = cache_path.as_deref().map(Path::new);
+        let api_key = api_key.as_deref();
+        let history =
+            goo::app::load_enriched_history(&log_path, cache_path, api_key).map_err(|err| err.to_string())?;
 
-    Ok(HistoryPayload {
-        entries: history.entries,
-        cache_warning: history.cache_warning,
+        Ok(HistoryPayload {
+            entries: history.entries,
+            cache_warning: history.cache_warning,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -64,26 +83,49 @@ fn load_settings() -> Result<SettingsPayload, String> {
     let nim_key_present = read_nim_key().is_some()
         || std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key).is_some()
         || std::env::var("NIM_API_KEY").ok().and_then(normalize_key).is_some();
+    let gemini_key_present = read_gemini_key().is_some()
+        || std::env::var("GEMINI_API_KEY").ok().and_then(normalize_key).is_some()
+        || std::env::var("GOOGLE_API_KEY").ok().and_then(normalize_key).is_some()
+        || std::env::var("GOOGLE_GENAI_API_KEY").ok().and_then(normalize_key).is_some();
+    let ai_provider = settings.ai_provider.unwrap_or_else(|| "gemini".to_string());
+    let nim_model = settings
+        .nim_model
+        .unwrap_or_else(|| "google/diffusiongemma-26b-a4b-it".to_string());
     Ok(SettingsPayload {
         log_path: settings.log_path,
         cache_path: settings.cache_path,
         tmdb_key_present,
         nim_key_present,
+        gemini_key_present,
+        manual_exclusions: settings.manual_exclusions,
+        ai_provider,
+        nim_model,
     })
 }
 
 #[tauri::command]
 fn save_settings(settings: SettingsInput) -> Result<(), String> {
-    let stored = StoredSettings {
-        log_path: settings.log_path,
-        cache_path: settings.cache_path,
-    };
+    let mut stored = read_settings();
+    stored.log_path = settings.log_path;
+    stored.cache_path = settings.cache_path;
+    if let Some(exclusions) = settings.manual_exclusions {
+        stored.manual_exclusions = exclusions;
+    }
+    if let Some(provider) = settings.ai_provider {
+        stored.ai_provider = Some(provider);
+    }
+    if let Some(model) = settings.nim_model {
+        stored.nim_model = Some(model);
+    }
     write_settings(&stored)?;
     if let Some(key) = settings.tmdb_api_key.and_then(normalize_key) {
         store_tmdb_key(&key)?;
     }
     if let Some(key) = settings.nim_api_key.and_then(normalize_key) {
         store_nim_key(&key)?;
+    }
+    if let Some(key) = settings.gemini_api_key.and_then(normalize_key) {
+        store_gemini_key(&key)?;
     }
     Ok(())
 }
@@ -92,6 +134,7 @@ fn save_settings(settings: SettingsInput) -> Result<(), String> {
 fn clear_keys() -> Result<(), String> {
     let _ = delete_tmdb_key();
     let _ = delete_nim_key();
+    let _ = delete_gemini_key();
     Ok(())
 }
 
@@ -102,30 +145,68 @@ fn delete_log(log_path: Option<String>) -> Result<(), String> {
     delete_log_file(&log_path)
 }
 
+
 #[tauri::command]
-fn get_recommendations(
+async fn test_nim_model(api_key: Option<String>, model: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let key = api_key
+            .and_then(normalize_key)
+            .or_else(read_nim_key)
+            .or_else(|| std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key))
+            .or_else(|| std::env::var("NIM_API_KEY").ok().and_then(normalize_key))
+            .ok_or_else(|| "NVIDIA API key not found. Please enter an API key to test the model.".to_string())?;
+
+        goo::nim::test_nim_model(&key, &model)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_recommendations(
     exclusion_list: Vec<String>,
+    ai_provider: Option<String>,
+    gemini_api_key: Option<String>,
     nim_api_key: Option<String>,
+    nim_model: Option<String>,
     tmdb_api_key: Option<String>,
 ) -> Result<Vec<goo::nim::EnrichedRecommendation>, String> {
-    let api_key = nim_api_key
-        .and_then(normalize_key)
-        .or_else(read_nim_key)
-        .or_else(|| std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key))
-        .or_else(|| std::env::var("NIM_API_KEY").ok().and_then(normalize_key))
-        .ok_or_else(|| "NIM API key not found. Set it in Settings or via NVIDIA_API_KEY.".to_string())?;
-    
-    let tmdb_key = tmdb_api_key
-        .and_then(normalize_key)
-        .or_else(read_tmdb_key);
-    
-    let tmdb_client = if let Some(key) = tmdb_key {
-        goo::tmdb::TmdbClient::new(key)
-    } else {
-        goo::tmdb::TmdbClient::from_env().map_err(|e| e.to_string())?
-    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = read_settings();
+        let provider = ai_provider
+            .or(settings.ai_provider)
+            .unwrap_or_else(|| "gemini".to_string());
 
-    goo::nim::get_recommendations(&api_key, exclusion_list, &tmdb_client)
+        let tmdb_key = tmdb_api_key
+            .and_then(normalize_key)
+            .or_else(read_tmdb_key)
+            .or_else(|| std::env::var("TMDB_API_KEY").ok().and_then(normalize_key));
+        let tmdb_client = tmdb_key.map(goo::tmdb::TmdbClient::new);
+
+        if provider.eq_ignore_ascii_case("nim") {
+            let api_key = nim_api_key
+                .and_then(normalize_key)
+                .or_else(read_nim_key)
+                .or_else(|| std::env::var("NVIDIA_API_KEY").ok().and_then(normalize_key))
+                .or_else(|| std::env::var("NIM_API_KEY").ok().and_then(normalize_key))
+                .ok_or_else(|| "NIM API key not found. Set it in Settings or via NVIDIA_API_KEY.".to_string())?;
+
+            let model = nim_model.as_deref().or(settings.nim_model.as_deref());
+            goo::nim::get_recommendations(&api_key, model, exclusion_list, tmdb_client.as_ref())
+        } else {
+            let api_key = gemini_api_key
+                .and_then(normalize_key)
+                .or_else(read_gemini_key)
+                .or_else(|| std::env::var("GEMINI_API_KEY").ok().and_then(normalize_key))
+                .or_else(|| std::env::var("GOOGLE_API_KEY").ok().and_then(normalize_key))
+                .or_else(|| std::env::var("GOOGLE_GENAI_API_KEY").ok().and_then(normalize_key))
+                .ok_or_else(|| "Gemini API key not found. Set it in Settings or via GEMINI_API_KEY.".to_string())?;
+
+            goo::gemini::get_recommendations(&api_key, exclusion_list, tmdb_client.as_ref())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -137,6 +218,90 @@ fn delete_entry(
     let settings = read_settings();
     let log_path = resolve_log_path(log_path.or(settings.log_path))?;
     delete_log_entries(&log_path, &cleaned_title, release_year)
+}
+
+#[tauri::command]
+#[allow(deprecated)]
+fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    if app.shell().open(&url, None).is_ok() {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Failed to open URL".to_string())
+}
+
+#[tauri::command]
+fn set_manual_tmdb_id(
+    log_path: Option<String>,
+    cache_path: Option<String>,
+    cleaned_title: String,
+    release_year: Option<i32>,
+    tmdb_id: u32,
+    tmdb_api_key: Option<String>,
+) -> Result<goo::enrich::EnrichedEntry, String> {
+    let settings = read_settings();
+    let log_path = resolve_log_path(log_path.or(settings.log_path))?;
+    let cache_path = cache_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| goo::app::default_cache_path(&log_path));
+
+    let api_key = tmdb_api_key
+        .and_then(normalize_key)
+        .or_else(read_tmdb_key)
+        .or_else(|| std::env::var("TMDB_API_KEY").ok().and_then(normalize_key))
+        .ok_or_else(|| "TMDB API key required to link movie ID. Set it in Settings.".to_string())?;
+
+    let client = goo::tmdb::TmdbClient::new(api_key);
+    let movie = client
+        .get_movie(tmdb_id)
+        .map_err(|e| format!("Failed to fetch movie from TMDB: {}", e))?
+        .ok_or_else(|| format!("Movie with TMDB ID {} not found on TMDB.", tmdb_id))?;
+
+    let mut cache = goo::enrich::MovieCache::load(&cache_path);
+    cache.set_entry(&cleaned_title, release_year, movie.clone());
+    let _ = cache.save(&cache_path);
+
+    let poster_url = movie.poster_url(goo::tmdb::DEFAULT_POSTER_SIZE);
+    let tmdb_url = Some(movie.tmdb_url());
+
+    Ok(goo::enrich::EnrichedEntry {
+        watched_at: None,
+        raw_title: cleaned_title.clone(),
+        cleaned_title,
+        release_year,
+        movie: Some(movie),
+        tmdb_url,
+        poster_url,
+    })
 }
 
 fn resolve_log_path(arg: Option<String>) -> Result<PathBuf, String> {
@@ -272,6 +437,42 @@ fn delete_nim_key() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn read_gemini_key() -> Option<String> {
+    let entry = keyring::Entry::new("goo", "gemini_api_key").ok()?;
+    match entry.get_password() {
+        Ok(value) => normalize_key(value),
+        Err(_) => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_gemini_key() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn store_gemini_key(value: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "gemini_api_key").map_err(|err| err.to_string())?;
+    entry.set_password(value).map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn store_gemini_key(_value: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn delete_gemini_key() -> Result<(), String> {
+    let entry = keyring::Entry::new("goo", "gemini_api_key").map_err(|err| err.to_string())?;
+    entry.delete_password().map_err(|err| err.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn delete_gemini_key() -> Result<(), String> {
+    Ok(())
+}
+
 fn install_vlc_logger() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -399,7 +600,10 @@ fn main() {
             clear_keys,
             delete_log,
             delete_entry,
-            get_recommendations
+            get_recommendations,
+            set_manual_tmdb_id,
+            open_url,
+            test_nim_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

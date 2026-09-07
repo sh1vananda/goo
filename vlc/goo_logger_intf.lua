@@ -76,6 +76,29 @@ local function get_current_uri()
     return uri
 end
 
+local VIDEO_EXTENSIONS = {
+    mkv = true, mp4 = true, avi = true, mov = true,
+    wmv = true, m4v = true, webm = true, flv = true,
+    ts = true, m2ts = true, iso = true, vob = true,
+    mpg = true, mpeg = true
+}
+
+local function is_video_media(uri)
+    if not uri or uri == "" then
+        return false
+    end
+    -- Direct optical disc playback (DVD / BluRay)
+    if uri:match("^dvd://") or uri:match("^bluray://") or uri:match("^vcd://") then
+        return true
+    end
+    -- Check file extension
+    local ext = uri:match("%.([%w]+)$")
+    if ext then
+        return VIDEO_EXTENSIONS[ext:lower()] == true
+    end
+    return false
+end
+
 local function log_current_media()
     -- Check if something is playing
     local input = vlc.object.input()
@@ -95,6 +118,11 @@ local function log_current_media()
     
     -- Skip internal/special URIs
     if uri:match("^vlc://") or uri == "__activated__" then
+        return
+    end
+
+    -- Skip non-video files (audio tracks, playlists, etc.)
+    if not is_video_media(uri) then
         return
     end
     

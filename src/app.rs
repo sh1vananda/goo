@@ -26,14 +26,14 @@ pub fn load_enriched_history(
         .map(PathBuf::from)
         .unwrap_or_else(|| default_cache_path(log_path));
     let client = if let Some(key) = tmdb_api_key {
-        TmdbClient::new(key)
+        Some(TmdbClient::new(key))
     } else {
-        TmdbClient::from_env()?
+        TmdbClient::from_env().ok()
     };
     let entries = read_watch_log(log_path)?;
 
     let mut cache = MovieCache::load(&cache_path);
-    let enriched = enrich_entries(entries, &client, &mut cache)?;
+    let enriched = enrich_entries(entries, client.as_ref(), &mut cache)?;
     let cache_warning = cache
         .save(&cache_path)
         .err()

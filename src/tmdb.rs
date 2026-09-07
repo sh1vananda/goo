@@ -50,6 +50,36 @@ impl TmdbClient {
         Ok(Self::new(key))
     }
 
+    pub fn get_movie(&self, id: u32) -> Result<Option<TmdbMovie>, TmdbError> {
+        let url = format!("https://api.themoviedb.org/3/movie/{}", id);
+        for attempt in 0..2 {
+            let request = ureq::get(&url)
+                .set("Accept", "application/json")
+                .set("User-Agent", "Goo/0.1.0")
+                .query("api_key", &self.api_key)
+                .timeout(std::time::Duration::from_secs(10));
+
+            match request.call() {
+                Ok(response) => {
+                    let body = response.into_string()?;
+                    let movie: TmdbMovie = serde_json::from_str(&body)?;
+                    return Ok(Some(movie));
+                }
+                Err(ureq::Error::Status(404, _)) => return Ok(None),
+                Err(ureq::Error::Status(code, res)) => {
+                    let body = res.into_string().unwrap_or_default();
+                    return Err(TmdbError::HttpStatus { code, body });
+                }
+                Err(_) if attempt == 0 => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                Err(err) => return Err(TmdbError::Request(err)),
+            }
+        }
+        Ok(None)
+    }
+
     pub fn search_movie(
         &self,
         title: &str,
@@ -60,31 +90,37 @@ impl TmdbClient {
             return Ok(Vec::new());
         }
 
-        let mut request = ureq::get(TMDB_SEARCH_URL)
-            .set("Accept", "application/json")
-            .query("api_key", &self.api_key)
-            .query("query", trimmed)
-            .query("include_adult", "false")
-            .timeout(std::time::Duration::from_secs(10));
+        for attempt in 0..2 {
+            let mut request = ureq::get(TMDB_SEARCH_URL)
+                .set("Accept", "application/json")
+                .set("User-Agent", "Goo/0.1.0")
+                .query("api_key", &self.api_key)
+                .query("query", trimmed)
+                .query("include_adult", "false")
+                .timeout(std::time::Duration::from_secs(10));
 
-        if let Some(year) = year {
-            request = request.query("year", &year.to_string());
-        }
-
-        let response = request.call();
-
-        let response = match response {
-            Ok(value) => value,
-            Err(ureq::Error::Status(code, res)) => {
-                let body = res.into_string().unwrap_or_default();
-                return Err(TmdbError::HttpStatus { code, body });
+            if let Some(year) = year {
+                request = request.query("year", &year.to_string());
             }
-            Err(err) => return Err(TmdbError::Request(err)),
-        };
 
-        let body = response.into_string()?;
-        let parsed: TmdbSearchResponse = serde_json::from_str(&body)?;
-        Ok(parsed.results)
+            match request.call() {
+                Ok(response) => {
+                    let body = response.into_string()?;
+                    let parsed: TmdbSearchResponse = serde_json::from_str(&body)?;
+                    return Ok(parsed.results);
+                }
+                Err(ureq::Error::Status(code, res)) => {
+                    let body = res.into_string().unwrap_or_default();
+                    return Err(TmdbError::HttpStatus { code, body });
+                }
+                Err(_) if attempt == 0 => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                Err(err) => return Err(TmdbError::Request(err)),
+            }
+        }
+        Ok(Vec::new())
     }
 
     pub fn best_match(
@@ -92,7 +128,37 @@ impl TmdbClient {
         title: &str,
         year: Option<i32>,
     ) -> Result<Option<TmdbMovie>, TmdbError> {
-        Ok(self.search_movie(title, year)?.into_iter().next())
+        // 1. Strict title + year
+        let results = self.search_movie(title, year)?;
+        if let Some(first) = results.into_iter().next() {
+            return Ok(Some(first));
+        }
+
+        // 2. Year fallback: try search without strict year constraint
+        if year.is_some() {
+            let fallback_results = self.search_movie(title, None)?;
+            if let Some(first) = fallback_results.into_iter().next() {
+                return Ok(Some(first));
+            }
+        }
+
+        // 3. Punctuation fallback: try replacing hyphens/colons/underscores
+        let cleaned_symbols = title.replace(['-', ':', ';', '_'], " ");
+        let cleaned_symbols = cleaned_symbols.trim();
+        if cleaned_symbols != title.trim() {
+            let fallback_results = self.search_movie(cleaned_symbols, year)?;
+            if let Some(first) = fallback_results.into_iter().next() {
+                return Ok(Some(first));
+            }
+            if year.is_some() {
+                let fallback_no_year = self.search_movie(cleaned_symbols, None)?;
+                if let Some(first) = fallback_no_year.into_iter().next() {
+                    return Ok(Some(first));
+                }
+            }
+        }
+
+        Ok(None)
     }
 }
 

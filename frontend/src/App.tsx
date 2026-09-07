@@ -38,6 +38,10 @@ type AppSettings = {
   cache_path?: string | null;
   tmdb_key_present?: boolean | null;
   nim_key_present?: boolean | null;
+  gemini_key_present?: boolean | null;
+  ai_provider?: string | null;
+  nim_model?: string | null;
+  manual_exclusions?: string[] | null;
 };
 
 type SettingsInput = {
@@ -45,6 +49,10 @@ type SettingsInput = {
   cache_path?: string | null;
   tmdb_api_key?: string | null;
   nim_api_key?: string | null;
+  gemini_api_key?: string | null;
+  ai_provider?: string | null;
+  nim_model?: string | null;
+  manual_exclusions?: string[] | null;
 };
 
 type HistoryPayload = {
@@ -115,11 +123,12 @@ function isTauriRuntime() {
 }
 
 async function openExternalLink(url: string) {
-  if (isTauriRuntime()) {
-    await open(url);
-    return;
+  try {
+    await invoke("open_url", { url });
+  } catch (err) {
+    console.error("Failed to open URL via backend command:", err);
+    window.open(url, "_blank", "noopener,noreferrer");
   }
-  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 export default function App() {
@@ -133,9 +142,23 @@ export default function App() {
   const [tmdbKeyPresent, setTmdbKeyPresent] = useState(false);
   const [nimApiKey, setNimApiKey] = useState("");
   const [nimKeyPresent, setNimKeyPresent] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState("");
+  const [geminiKeyPresent, setGeminiKeyPresent] = useState(false);
+  const [aiProvider, setAiProvider] = useState<"gemini" | "nim">("gemini");
+  const [nimModel, setNimModel] = useState("google/diffusiongemma-26b-a4b-it");
+  const [testingModel, setTestingModel] = useState(false);
+  const [modelTestStatus, setModelTestStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showRecsModal, setShowRecsModal] = useState(false);
   const [busyAction, setBusyAction] = useState<"delete-log" | "delete-entry" | "get-recs" | null>(null);
+  const [activeMenuKey, setActiveMenuKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeMenuKey) return;
+    const handleClickOutside = () => setActiveMenuKey(null);
+    window.addEventListener("click", handleClickOutside);
+    return () => window.removeEventListener("click", handleClickOutside);
+  }, [activeMenuKey]);
   const [recommendations, setRecommendations] = useState<EnrichedRecommendation[]>(() => {
     const saved = localStorage.getItem("goo_recommendations");
     try {
@@ -168,7 +191,25 @@ export default function App() {
     cache_path: normalizeSetting(resolveSetting(overrides, "cache_path", cachePath)),
     tmdb_api_key: normalizeSetting(tmdbApiKey),
     nim_api_key: normalizeSetting(nimApiKey),
+    gemini_api_key: normalizeSetting(geminiApiKey),
+    ai_provider: aiProvider,
+    nim_model: normalizeSetting(nimModel) || "google/diffusiongemma-26b-a4b-it",
+    manual_exclusions: overrides?.manual_exclusions !== undefined ? overrides.manual_exclusions : manualExclusions,
   });
+
+  const saveExclusions = async (exclusions: string[]) => {
+    try {
+      await invoke("save_settings", {
+        settings: {
+          log_path: normalizeSetting(logPath),
+          cache_path: normalizeSetting(cachePath),
+          manual_exclusions: exclusions,
+        },
+      });
+    } catch {
+      // ignore backend save failures
+    }
+  };
 
   const saveSettings = async () => {
     const payload = buildSettingsPayload();
@@ -205,7 +246,10 @@ export default function App() {
 
       const recs = await invoke<EnrichedRecommendation[]>("get_recommendations", {
         exclusionList,
+        aiProvider,
+        geminiApiKey: normalizeSetting(geminiApiKey) || null,
         nimApiKey: normalizeSetting(nimApiKey) || null,
+        nimModel: normalizeSetting(nimModel) || null,
         tmdbApiKey: normalizeSetting(tmdbApiKey) || null,
       });
 
@@ -223,6 +267,50 @@ export default function App() {
     const updated = Array.from(new Set([...manualExclusions, title]));
     setManualExclusions(updated);
     localStorage.setItem("goo_manual_exclusions", JSON.stringify(updated));
+    void saveExclusions(updated);
+  };
+
+  const handleManualLink = async (entry: EnrichedEntry) => {
+    const input = window.prompt(
+      `Link TMDB ID for "${entry.cleaned_title}":\nEnter a TMDB ID (e.g. 414419) or URL (e.g. https://www.themoviedb.org/movie/414419):`,
+      entry.movie?.id ? String(entry.movie.id) : ""
+    );
+    if (!input || !input.trim()) return;
+
+    const match = input.match(/(?:movie\/)?(\d+)/);
+    if (!match) {
+      window.alert("Please enter a valid numerical TMDB ID or TMDB movie URL.");
+      return;
+    }
+    const tmdbId = parseInt(match[1], 10);
+    if (isNaN(tmdbId)) return;
+
+    try {
+      const updated = await invoke<EnrichedEntry>("set_manual_tmdb_id", {
+        logPath: normalizeSetting(logPath),
+        cachePath: normalizeSetting(cachePath),
+        cleanedTitle: entry.cleaned_title,
+        releaseYear: entry.release_year ?? null,
+        tmdbId,
+        tmdbApiKey: normalizeSetting(tmdbApiKey) || null,
+      });
+
+      setEntries((prev) =>
+        prev.map((item) =>
+          item.cleaned_title === entry.cleaned_title && item.release_year === entry.release_year
+            ? {
+                ...item,
+                movie: updated.movie,
+                poster_url: updated.poster_url,
+                tmdb_url: updated.tmdb_url,
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      window.alert(`Failed to link TMDB ID: ${msg}`);
+    }
   };
 
   useEffect(() => {
@@ -233,8 +321,35 @@ export default function App() {
         setCachePath(settings.cache_path ?? "");
         setTmdbKeyPresent(Boolean(settings.tmdb_key_present));
         setNimKeyPresent(Boolean(settings.nim_key_present));
+        setGeminiKeyPresent(Boolean(settings.gemini_key_present));
+        setAiProvider(settings.ai_provider === "nim" ? "nim" : "gemini");
+        if (settings.nim_model) {
+          setNimModel(settings.nim_model);
+        }
         setTmdbApiKey("");
         setNimApiKey("");
+        setGeminiApiKey("");
+
+        const backendExclusions = Array.isArray(settings.manual_exclusions) ? settings.manual_exclusions : [];
+        const localExclusions = (() => {
+          try {
+            const saved = localStorage.getItem("goo_manual_exclusions");
+            const parsed = saved ? JSON.parse(saved) : [];
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })();
+        const merged = Array.from(new Set([...backendExclusions, ...localExclusions]));
+        if (merged.length > 0) {
+          setManualExclusions(merged);
+          setRawExclusionText(merged.join(", "));
+          localStorage.setItem("goo_manual_exclusions", JSON.stringify(merged));
+          if (backendExclusions.length !== merged.length) {
+            void saveExclusions(merged);
+          }
+        }
+
         await loadHistory(settings);
       } catch {
         await loadHistory();
@@ -353,18 +468,101 @@ export default function App() {
                   placeholder={tmdbKeyPresent ? "Saved in Windows Credential Manager" : "Optional (or set TMDB_API_KEY env)"}
                 />
               </label>
-              <label className="field">
-                <span>NVIDIA NIM API Key</span>
-                <input
-                  type="password"
-                  value={nimApiKey}
-                  onChange={(event) => setNimApiKey(event.target.value)}
-                  placeholder={nimKeyPresent ? "Saved in Windows Credential Manager" : "Required for recommendations"}
-                />
-              </label>
+              <div className="field">
+                <span className="field-title">Recommendation Engine</span>
+                <div className="provider-toggle">
+                  <button
+                    type="button"
+                    className={`provider-option ${aiProvider === "gemini" ? "active" : ""}`}
+                    onClick={() => {
+                      setAiProvider("gemini");
+                      setModelTestStatus(null);
+                    }}
+                  >
+                    Google Gemini
+                  </button>
+                  <button
+                    type="button"
+                    className={`provider-option ${aiProvider === "nim" ? "active" : ""}`}
+                    onClick={() => {
+                      setAiProvider("nim");
+                      setModelTestStatus(null);
+                    }}
+                  >
+                    NVIDIA NIM
+                  </button>
+                </div>
+              </div>
+
+              {aiProvider === "gemini" ? (
+                <label className="field">
+                  <span>Gemini API Key</span>
+                  <input
+                    type="password"
+                    value={geminiApiKey}
+                    onChange={(event) => setGeminiApiKey(event.target.value)}
+                    placeholder={geminiKeyPresent ? "Saved in Windows Credential Manager" : "Required for recommendations (or set GEMINI_API_KEY)"}
+                  />
+                </label>
+              ) : (
+                <>
+                  <label className="field">
+                    <span>NVIDIA NIM API Key</span>
+                    <input
+                      type="password"
+                      value={nimApiKey}
+                      onChange={(event) => setNimApiKey(event.target.value)}
+                      placeholder={nimKeyPresent ? "Saved in Windows Credential Manager" : "Required for recommendations (or set NVIDIA_API_KEY)"}
+                    />
+                  </label>
+
+                  <div className="field">
+                    <span>NVIDIA NIM Model</span>
+                    <div className="model-input-row">
+                      <input
+                        value={nimModel}
+                        onChange={(event) => {
+                          setNimModel(event.target.value);
+                          setModelTestStatus(null);
+                        }}
+                        placeholder="Enter model name (e.g. google/diffusiongemma-26b-a4b-it)"
+                      />
+                      <button
+                        type="button"
+                        className="test-model-btn"
+                        disabled={testingModel || !nimModel.trim()}
+                        onClick={async () => {
+                          setTestingModel(true);
+                          setModelTestStatus(null);
+                          try {
+                            const res = await invoke<string>("test_nim_model", {
+                              apiKey: normalizeSetting(nimApiKey) || null,
+                              model: nimModel.trim(),
+                            });
+                            setModelTestStatus({ success: true, message: res });
+                          } catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            setModelTestStatus({ success: false, message: msg });
+                          } finally {
+                            setTestingModel(false);
+                          }
+                        }}
+                        title="Ping NVIDIA NIM with this model to verify it is active"
+                      >
+                        {testingModel ? "Testing..." : "Test Model"}
+                      </button>
+                    </div>
+                    {modelTestStatus && (
+                      <div className={`model-test-result ${modelTestStatus.success ? "success" : "error"}`}>
+                        {modelTestStatus.message}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
             <div className="modal-footer">
-              {(tmdbKeyPresent || nimKeyPresent) && (
+              {(tmdbKeyPresent || nimKeyPresent || geminiKeyPresent) && (
                 <button
                   className="secondary"
                   onClick={() => {
@@ -372,8 +570,10 @@ export default function App() {
                       .then(() => {
                         setTmdbKeyPresent(false);
                         setNimKeyPresent(false);
+                        setGeminiKeyPresent(false);
                         setTmdbApiKey("");
                         setNimApiKey("");
+                        setGeminiApiKey("");
                       })
                       .catch(err => {
                         const message = err instanceof Error ? err.message : String(err);
@@ -427,6 +627,10 @@ export default function App() {
                         setNimKeyPresent(true);
                         setNimApiKey("");
                       }
+                      if (geminiApiKey.trim()) {
+                        setGeminiKeyPresent(true);
+                        setGeminiApiKey("");
+                      }
                       return loadHistory();
                     })
                     .catch(err => {
@@ -452,6 +656,11 @@ export default function App() {
               Set a key in Settings or via TMDB_API_KEY.
             </span>
           )}
+          {error.toLowerCase().includes("gemini") && (
+            <span className="hint">
+              Set or update your Gemini key in Settings or via GEMINI_API_KEY.
+            </span>
+          )}
           {error.toLowerCase().includes("nim") && (
             <span className="hint">
               Set or update your NVIDIA key in Settings or via NVIDIA_API_KEY.
@@ -472,7 +681,9 @@ export default function App() {
                 <h2>Recommendations</h2>
                 <div className="reco-status">
                   {busyAction === "get-recs" ? (
-                    <span className="curating">Fetching new insights...</span>
+                    <span className="curating">
+                      Curating insights via {aiProvider === "nim" ? "NVIDIA NIM" : "Google Gemini"}...
+                    </span>
                   ) : recommendations.length === 0 ? (
                     <span>Add to your history for new insights.</span>
                   ) : null}
@@ -519,6 +730,7 @@ export default function App() {
                       setManualExclusions(titles);
                       localStorage.setItem("goo_manual_exclusions", JSON.stringify(titles));
                     }}
+                    onBlur={() => void saveExclusions(manualExclusions)}
                     placeholder="Titles separated by commas..."
                   />
                   <span className="hint">Comma separated list of titles the AI will never suggest, but will use to fuel better fits.</span>
@@ -613,29 +825,145 @@ export default function App() {
             )}`;
           const poster = entry.poster_url ?? null;
 
+          const menuKey = `${entry.cleaned_title}-${entry.release_year ?? "unknown"}-${index}`;
+          const isMenuOpen = activeMenuKey === menuKey;
+
           return (
-            <article className="card" key={`${entry.raw_title}-${index}`}>
-              <a
-                className="poster"
-                href={tmdbLink}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(event) => {
-                  if (isTauriRuntime()) {
+            <article className={`card ${isMenuOpen ? "menu-open" : ""}`} key={`${entry.raw_title}-${index}`}>
+              <div className="poster-container">
+                <a
+                  className="poster"
+                  href={tmdbLink}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(event) => {
                     event.preventDefault();
-                    openExternalLink(tmdbLink).catch(() => { });
-                  }
-                }}
-              >
-                {poster ? (
-                  <img src={poster} alt={`${title} poster`} loading="lazy" />
-                ) : (
-                  <div className="poster-fallback">
-                    <span>{title}</span>
-                    <em>No poster</em>
-                  </div>
-                )}
-              </a>
+                    void openExternalLink(tmdbLink);
+                  }}
+                >
+                  {poster ? (
+                    <img src={poster} alt={`${title} poster`} loading="lazy" />
+                  ) : (
+                    <div className="poster-fallback">
+                      <span>{title}</span>
+                      <button
+                        type="button"
+                        className="link-tmdb-btn"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          void handleManualLink(entry);
+                        }}
+                        title="Link TMDB movie ID"
+                      >
+                        Link TMDB ID
+                      </button>
+                    </div>
+                  )}
+                </a>
+
+                {/* On-hover three-dot menu on top right of poster */}
+                <div className="card-menu-wrapper" onClick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    className={`card-menu-trigger ${isMenuOpen ? "active" : ""}`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setActiveMenuKey(isMenuOpen ? null : menuKey);
+                    }}
+                    title="Movie options"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                      <circle cx="12" cy="5" r="2" />
+                      <circle cx="12" cy="12" r="2" />
+                      <circle cx="12" cy="19" r="2" />
+                    </svg>
+                  </button>
+
+                  {isMenuOpen && (
+                    <div className="card-dropdown-menu" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        className="dropdown-item"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setActiveMenuKey(null);
+                          void openExternalLink(tmdbLink);
+                        }}
+                        title="Open on TMDB"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                          <polyline points="15 3 21 3 21 9" />
+                          <line x1="10" y1="14" x2="21" y2="3" />
+                        </svg>
+                        <span>TMDB</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="dropdown-item"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setActiveMenuKey(null);
+                          void handleManualLink(entry);
+                        }}
+                        title="Edit TMDB ID"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                        </svg>
+                        <span>Edit ID</span>
+                      </button>
+
+                      <div className="dropdown-divider" />
+
+                      <button
+                        type="button"
+                        className="dropdown-item delete-item"
+                        onClick={async (e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setActiveMenuKey(null);
+                          const ok = window.confirm(
+                            "Remove this title from your history?"
+                          );
+                          if (!ok) return;
+                          addExclusion(entry.cleaned_title);
+                          setBusyAction("delete-entry");
+                          try {
+                            await invoke("delete_entry", {
+                              logPath: logPath.trim() ? logPath.trim() : null,
+                              cleanedTitle: entry.cleaned_title,
+                              releaseYear: entry.release_year ?? null,
+                            });
+                            await loadHistory();
+                          } catch (err) {
+                            const message = err instanceof Error ? err.message : String(err);
+                            setError(message);
+                          } finally {
+                            setBusyAction(null);
+                          }
+                        }}
+                        disabled={busyAction !== null}
+                        title="Delete from history"
+                      >
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 6h18" />
+                          <path d="M8 6V4h8v2" />
+                          <path d="M6 6l1 14h10l1-14" />
+                        </svg>
+                        <span>Delete</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <div className="card-body">
                 <div className="title-row">
                   <h3 title={title}>{title}</h3>
@@ -648,54 +976,6 @@ export default function App() {
                   >
                     {dateInfo.text}
                   </span>
-                  <div className="meta-actions">
-                    <a
-                      className="tmdb-link"
-                      href={tmdbLink}
-                      target="_blank"
-                      rel="noreferrer"
-                      onClick={(event) => {
-                        if (isTauriRuntime()) {
-                          event.preventDefault();
-                          openExternalLink(tmdbLink).catch(() => { });
-                        }
-                      }}
-                    >
-                      TMDB
-                    </a>
-                    <button
-                      className="meta-button"
-                      onClick={async () => {
-                        const ok = window.confirm(
-                          "Remove this title from your history?"
-                        );
-                        if (!ok) return;
-                        addExclusion(entry.cleaned_title);
-                        setBusyAction("delete-entry");
-                        try {
-                          await invoke("delete_entry", {
-                            logPath: logPath.trim() ? logPath.trim() : null,
-                            cleanedTitle: entry.cleaned_title,
-                            releaseYear: entry.release_year ?? null,
-                          });
-                          await loadHistory();
-                        } catch (err) {
-                          const message = err instanceof Error ? err.message : String(err);
-                          setError(message);
-                        } finally {
-                          setBusyAction(null);
-                        }
-                      }}
-                      disabled={busyAction !== null}
-                      title="Remove and mark as watched"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M3 6h18" />
-                        <path d="M8 6V4h8v2" />
-                        <path d="M6 6l1 14h10l1-14" />
-                      </svg>
-                    </button>
-                  </div>
                 </div>
               </div>
             </article>

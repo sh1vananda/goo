@@ -25,7 +25,15 @@ impl MovieCache {
         let Ok(content) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        serde_json::from_str(&content).unwrap_or_default()
+        let mut cache: Self = serde_json::from_str(&content).unwrap_or_default();
+        // Evict negative entries on load so unmatched/poisoned entries are re-queried
+        cache.entries.retain(|_, v| v.is_some());
+        cache
+    }
+
+    pub fn set_entry(&mut self, title: &str, year: Option<i32>, movie: TmdbMovie) {
+        let key = cache_key(title, year);
+        self.entries.insert(key, Some(movie));
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -37,7 +45,7 @@ impl MovieCache {
 
 pub fn enrich_entries(
     entries: Vec<WatchEntry>,
-    client: &TmdbClient,
+    client: Option<&TmdbClient>,
     cache: &mut MovieCache,
 ) -> Result<Vec<EnrichedEntry>, TmdbError> {
     let mut enriched = Vec::with_capacity(entries.len());
@@ -47,12 +55,24 @@ pub fn enrich_entries(
             None
         } else if let Some(cached) = cache.entries.get(&key) {
             cached.clone()
+        } else if let Some(client) = client {
+            match client.best_match(&entry.cleaned_title, entry.release_year) {
+                Ok(Some(movie)) => {
+                    cache.entries.insert(key, Some(movie.clone()));
+                    Some(movie)
+                }
+                Ok(None) => {
+                    // Confirmed absent on TMDB: cache negative result
+                    cache.entries.insert(key, None);
+                    None
+                }
+                Err(_) => {
+                    // Network failure, timeout, or rate-limit: do NOT poison cache with None
+                    None
+                }
+            }
         } else {
-            let fetched = client
-                .best_match(&entry.cleaned_title, entry.release_year)
-                .unwrap_or(None);
-            cache.entries.insert(key, fetched.clone());
-            fetched
+            None
         };
 
         enriched.push(EnrichedEntry::from_watch(entry, movie));
@@ -84,5 +104,28 @@ impl EnrichedEntry {
             tmdb_url,
             poster_url,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enriches_without_tmdb_client() {
+        let entries = vec![WatchEntry {
+            watched_at: Some("2026-01-01T00:00:00Z".to_string()),
+            raw_title: "Possession.1981.mkv".to_string(),
+            cleaned_title: "Possession".to_string(),
+            release_year: Some(1981),
+        }];
+        let mut cache = MovieCache::default();
+        let enriched = enrich_entries(entries, None, &mut cache).expect("enrich success");
+        assert_eq!(enriched.len(), 1);
+        assert_eq!(enriched[0].cleaned_title, "Possession");
+        assert_eq!(enriched[0].poster_url, None);
+        assert_eq!(enriched[0].tmdb_url, None);
+        // Cache must NOT be polluted with negative entries when client is absent
+        assert!(cache.entries.is_empty());
     }
 }

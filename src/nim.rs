@@ -67,9 +67,14 @@ struct NimMessageContent {
 
 pub fn get_recommendations(
     api_key: &str,
+    model: Option<&str>,
     exclusion_list: Vec<String>,
-    tmdb_client: &TmdbClient,
+    tmdb_client: Option<&TmdbClient>,
 ) -> Result<Vec<EnrichedRecommendation>, String> {
+    let selected_model = model
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(NIM_MODEL);
     let exclusion_str = exclusion_list.join(", ");
 
     let system_prompt = format!(
@@ -100,8 +105,16 @@ Study the titles above with care. Identify recurring patterns in directors, them
         "Curate 5 films from the darkest, most formally daring corners of world cinema that I have not yet seen. Prioritize the obscure, the transgressive, and the genuinely unsettling. Return ONLY the JSON array."
             .to_string();
 
+    let chat_kwargs = if selected_model.contains("diffusiongemma") {
+        Some(ChatTemplateKwargs {
+            enable_thinking: true,
+        })
+    } else {
+        None
+    };
+
     let request_body = NimRequest {
-        model: NIM_MODEL.to_string(),
+        model: selected_model.to_string(),
         messages: vec![
             NimMessage {
                 role: "system".to_string(),
@@ -115,28 +128,74 @@ Study the titles above with care. Identify recurring patterns in directors, them
         temperature: 1.0,
         top_p: 0.95,
         max_tokens: 4096,
-        chat_template_kwargs: Some(ChatTemplateKwargs {
-            enable_thinking: true,
-        }),
+        chat_template_kwargs: chat_kwargs,
         response_format: None,
     };
 
-    let response = ureq::post(&format!("{}/chat/completions", NIM_API_BASE))
-        .set("Authorization", &format!("Bearer {}", api_key))
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(60))
-        .send_json(&request_body)
-        .map_err(|e| match e {
-            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
-                "NIM request failed: status code 403 (Forbidden / Authorization failed). Your NVIDIA API key may be invalid, expired, or out of free credits. Please generate a new key at build.nvidia.com and update it in Settings or via NVIDIA_API_KEY.".to_string()
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .build();
+
+    let mut last_error = None;
+    let mut response_opt = None;
+
+    // Retry once on transient network drops or timeouts
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+
+        let res = agent.post(&format!("{}/chat/completions", NIM_API_BASE))
+            .set("Authorization", &format!("Bearer {}", api_key))
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .send_json(&request_body);
+
+        match res {
+            Ok(r) => {
+                response_opt = Some(r);
+                break;
             }
-            ureq::Error::Status(code, resp) => {
+            Err(e) => {
+                // If it's a client status error (401, 403, 404, 410), don't retry
+                if let ureq::Error::Status(code, _) = &e {
+                    if *code >= 400 && *code < 500 {
+                        last_error = Some(e);
+                        break;
+                    }
+                }
+                last_error = Some(e);
+            }
+        }
+    }
+
+    let response = response_opt.ok_or_else(|| {
+        match last_error {
+            Some(ureq::Error::Status(401, _)) | Some(ureq::Error::Status(403, _)) => {
+                "NIM request failed: status code 403 (Forbidden / Authorization failed). Your NVIDIA API key may be invalid, expired, or out of free credits. Please generate a new key at build.nvidia.com, update it in Settings, or switch to Google Gemini.".to_string()
+            }
+            Some(ureq::Error::Status(410, _)) => {
+                format!("NIM request failed: Model '{}' reached end-of-life (status 410) and is no longer available on NVIDIA NIM. Please update the model in Settings.", selected_model)
+            }
+            Some(ureq::Error::Status(404, _)) => {
+                format!("NIM request failed: Model '{}' was not found on NVIDIA NIM (status 404). Please verify the model identifier in Settings.", selected_model)
+            }
+            Some(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 format!("NIM request failed: status code {}: {}", code, body)
             }
-            ureq::Error::Transport(err) => format!("NIM transport error: {}", err),
-        })?;
+            Some(ureq::Error::Transport(err)) => {
+                let err_str = err.to_string();
+                if err_str.contains("10060") || err_str.contains("timed out") || err_str.contains("did not properly respond") {
+                    format!("NIM network timeout (os error 10060): NVIDIA NIM servers did not respond in time for model '{}'. NVIDIA's cloud may be experiencing cold-start delays or heavy queuing. You can test another model or switch to Google Gemini in Settings for instant responses.", selected_model)
+                } else {
+                    format!("NIM transport error: {}", err)
+                }
+            }
+            None => "Unknown NIM network failure".to_string(),
+        }
+    })?;
 
     let nim_res: NimResponse = response
         .into_json()
@@ -182,11 +241,13 @@ Study the titles above with care. Identify recurring patterns in directors, them
 
     let mut enriched = Vec::new();
     for rec in recommendations {
-        // Graceful TMDB: don't fail the batch if one lookup errors
-        let movie = tmdb_client
-            .best_match(&rec.title, Some(rec.year as i32))
-            .ok()
-            .flatten();
+        // Graceful TMDB: don't fail the batch if TMDB is omitted or one lookup errors
+        let movie = tmdb_client.and_then(|client| {
+            client
+                .best_match(&rec.title, Some(rec.year as i32))
+                .ok()
+                .flatten()
+        });
         enriched.push(EnrichedRecommendation {
             poster_url: movie.as_ref().and_then(|m| m.poster_url("w342")),
             tmdb_url: movie.map(|m| m.tmdb_url()),
@@ -200,7 +261,7 @@ Study the titles above with care. Identify recurring patterns in directors, them
 /// Extracts the outermost JSON structure (either an array `[...]` or an object `{...}`)
 /// from a string, handling common AI quirks and repairing malformed JSON on-the-fly.
 /// It immediately returns when the outermost structure closes, ignoring any trailing characters.
-fn extract_json(raw: &str) -> Option<String> {
+pub fn extract_json(raw: &str) -> Option<String> {
     let mut text = raw.to_string();
 
     // Strip <think>...</think> blocks (some models emit reasoning)
@@ -415,5 +476,76 @@ mod tests {
             extracted,
             "[{\"title\":\"Possession\",\"year\":1981,\"director\":\"Andrzej Żuławski\",\"genres\":[\"Body Horror\"]}]"
         );
+    }
+}
+
+
+pub fn test_nim_model(api_key: &str, model: &str) -> Result<String, String> {
+    let model_trimmed = model.trim();
+    if model_trimmed.is_empty() {
+        return Err("Please enter a model name to test.".to_string());
+    }
+
+    #[derive(Serialize)]
+    struct PingMessage<'a> {
+        role: &'a str,
+        content: &'a str,
+    }
+
+    #[derive(Serialize)]
+    struct PingRequest<'a> {
+        model: &'a str,
+        messages: Vec<PingMessage<'a>>,
+        max_tokens: u32,
+        temperature: f32,
+    }
+
+    let request_body = PingRequest {
+        model: model_trimmed,
+        messages: vec![PingMessage {
+            role: "user",
+            content: "ping",
+        }],
+        max_tokens: 5,
+        temperature: 0.0,
+    };
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(15))
+        .build();
+
+    let response = agent.post(&format!("{}/chat/completions", NIM_API_BASE))
+        .set("Authorization", &format!("Bearer {}", api_key.trim()))
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .send_json(&request_body);
+
+    match response {
+        Ok(_) => Ok(format!("Model '{}' is active and verified.", model_trimmed)),
+        Err(ureq::Error::Status(410, _)) => {
+            Err(format!("Model '{}' reached end-of-life (status 410) and is no longer available on NVIDIA NIM.", model_trimmed))
+        }
+        Err(ureq::Error::Status(404, _)) => {
+            Err(format!("Model '{}' was not found on NVIDIA NIM (status 404). Check spelling.", model_trimmed))
+        }
+        Err(ureq::Error::Status(401, _) | ureq::Error::Status(403, _)) => {
+            Err("Authentication failed (status 401/403). Your NVIDIA API key is invalid or unauthorized.".to_string())
+        }
+        Err(ureq::Error::Status(429, _)) => {
+            Err("Rate limit or quota exceeded (status 429). Model exists but account quota is limited.".to_string())
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(format!("Test failed (status {}): {}", code, body))
+        }
+        Err(ureq::Error::Transport(err)) => {
+            let err_str = err.to_string();
+            if err_str.contains("10060") || err_str.contains("timed out") || err_str.contains("did not properly respond") {
+                Err(format!("Connection timed out (10060): NVIDIA NIM servers failed to respond for model '{}'. The model may be queued or unresponsive.", model_trimmed))
+            } else {
+                Err(format!("Network transport error: {}", err))
+            }
+        }
     }
 }
